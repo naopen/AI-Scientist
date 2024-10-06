@@ -6,28 +6,36 @@ encoder and decoder and some other related info.
 """
 import os
 import pickle
-import requests
+import PyPDF2
 import numpy as np
 
-# download the enwik8 dataset
-input_file_path = os.path.join(os.path.dirname(__file__), 'enwik8')
-if not os.path.exists(input_file_path):
-    data_url = 'http://mattmahoney.net/dc/enwik8.zip'
-    r = requests.get(data_url)
-    with open(os.path.join(os.path.dirname(__file__), 'enwik8.zip'), 'wb') as f:
-        f.write(r.content)
+# Function to extract text from PDF files
+def extract_text_from_pdfs(pdf_dir):
+    text_data = ""
+    for filename in os.listdir(pdf_dir):
+        if filename.endswith('.pdf'):
+            with open(os.path.join(pdf_dir, filename), 'rb') as f:
+                reader = PyPDF2.PdfReader(f)
+                for page in reader.pages:
+                    text_data += page.extract_text()
+    return text_data
 
-    # unzip the enwik8 dataset
-    import zipfile
-    with zipfile.ZipFile(os.path.join(os.path.dirname(__file__), 'enwik8.zip'), 'r') as zip_ref:
-        zip_ref.extractall(os.path.dirname(__file__))
-
-with open(input_file_path, 'r', encoding='latin-1') as f:
-    data = f.read()
+# Directory containing PDF files
+pdf_dir = os.path.join(os.path.dirname(__file__), 'pdf_reports')
+data = extract_text_from_pdfs(pdf_dir)
 print(f"length of dataset in characters: {len(data):,}")
 
+# Placeholder for ESG-related content extraction logic
+def extract_esg_content(text):
+    # Implement logic to extract ESG-related content from text
+    # This could involve keyword matching, NLP techniques, etc.
+    return text
+
+# Extract ESG-related content
+esg_data = extract_esg_content(data)
+
 # get all the unique characters that occur in this text
-chars = sorted(list(set(data)))
+chars = sorted(list(set(esg_data)))
 vocab_size = len(chars)
 print("all the unique characters:", ''.join(chars))
 print(f"vocab size: {vocab_size:,}")
@@ -41,11 +49,11 @@ def decode(l):
     return ''.join([itos[i] for i in l]) # decoder: take a list of integers, output a string
 
 # create the train, validation, and test splits
-n = len(data)
+n = len(esg_data)
 num_test_chars = 5000000
-train_data = data[: -2 * num_test_chars]
-val_data = data[-2 * num_test_chars: -num_test_chars]
-test_data = data[-num_test_chars:]
+train_data = esg_data[: -2 * num_test_chars]
+val_data = esg_data[-2 * num_test_chars: -num_test_chars]
+test_data = esg_data[-num_test_chars:]
 
 # encode all splits to integers
 train_ids = encode(train_data)
