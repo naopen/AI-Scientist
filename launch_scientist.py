@@ -49,7 +49,7 @@ def parse_arguments():
         default="claude-3-5-sonnet-20240620",
         choices=[
             "claude-3-5-sonnet-20240620",
-            "gpt-4o-2024-05-13",
+            "gpt-4o-2024-08-06",
             "deepseek-coder-v2-0724",
             "llama3.1-405b",
             # Anthropic Claude models via Amazon Bedrock
@@ -246,7 +246,7 @@ def do_idea(
                 paper_text = load_paper(f"{folder_name}/{idea['Name']}.pdf")
                 review = perform_review(
                     paper_text,
-                    model="gpt-4o-2024-05-13",
+                    model="gpt-4o-2024-08-06",
                     client=openai.OpenAI(),
                     num_reflections=5,
                     num_fs_examples=1,
@@ -272,7 +272,7 @@ def do_idea(
                 paper_text = load_paper(f"{folder_name}/{idea['Name']}_improved.pdf")
                 review = perform_review(
                     paper_text,
-                    model="gpt-4o-2024-05-13",
+                    model="gpt-4o-2024-08-06",
                     client=openai.OpenAI(),
                     num_reflections=5,
                     num_fs_examples=1,
@@ -337,11 +337,11 @@ if __name__ == "__main__":
 
         print(f"Using Vertex AI with model {client_model}.")
         client = anthropic.AnthropicVertex()
-    elif args.model == "gpt-4o-2024-05-13":
+    elif args.model == "gpt-4o-2024-08-06":
         import openai
 
         print(f"Using OpenAI API with model {args.model}.")
-        client_model = "gpt-4o-2024-05-13"
+        client_model = "gpt-4o-2024-08-06"
         client = openai.OpenAI()
     elif args.model == "deepseek-coder-v2-0724":
         import openai
@@ -373,12 +373,18 @@ if __name__ == "__main__":
         max_num_generations=args.num_ideas,
         num_reflections=NUM_REFLECTIONS,
     )
-    ideas = check_idea_novelty(
-        ideas,
-        base_dir=base_dir,
-        client=client,
-        model=client_model,
-    )
+    # --skip-novelty-check が指定されていない場合のみ、check_idea_novelty() を呼び出す
+    if not args.skip_novelty_check:
+        ideas = check_idea_novelty(
+            ideas,
+            base_dir=base_dir,
+            client=client,
+            model=client_model,
+        )
+    else:
+        # --skip-novelty-check が指定された場合は、すべてのアイデアに "novel": True を追加
+        for idea in ideas:
+            idea["novel"] = True
 
     with open(osp.join(base_dir, "ideas.json"), "w") as f:
         json.dump(ideas, f, indent=4)

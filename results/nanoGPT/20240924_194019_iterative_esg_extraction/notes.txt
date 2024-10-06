@@ -1,0 +1,53 @@
+# Title: Iterative Refinement for Robust ESG Extraction: Adaptive Query-Response Loop
+# Experiment description: Implement an iterative question refinement and information extraction loop in the RAG system. This process consists of the following steps:
+1. Receive the user's initial question
+2. Automatically expand and refine the question considering ESG context
+3. Perform initial information extraction using the expanded question
+4. Analyze the extraction results to identify missing information or ambiguities
+5. Generate new supplementary questions based on identified issues
+6. Perform additional information extraction using supplementary questions
+7. Integrate new information to create a more comprehensive answer
+8. Repeat steps 4-7 as necessary
+This iterative approach enables the extraction of complex ESG information that cannot be obtained in a single pass, through gradually refined queries. The insights gained through this process can also be used to improve future question processing.
+## Run 0: Baseline
+Results: {'shakespeare_char': {'final_train_loss_mean': 0.8081305821736654, 'best_val_loss_mean': 1.4677925109863281, 'total_train_time_mean': 205.99763210614523, 'avg_inference_tokens_per_second_mean': 420.12798409603414}, 'enwik8': {'final_train_loss_mean': 0.9315934181213379, 'best_val_loss_mean': 1.0042643547058105, 'total_train_time_mean': 1824.0911252498627, 'avg_inference_tokens_per_second_mean': 429.3039335196625}, 'text8': {'final_train_loss_mean': 0.9926142692565918, 'best_val_loss_mean': 0.9801740050315857, 'total_train_time_mean': 1791.0722711086273, 'avg_inference_tokens_per_second_mean': 428.0359768780263}}
+Description: Baseline results.
+
+## Run 1: Basic Iterative Refinement
+Results: {'shakespeare_char': {'final_train_loss_mean': 0.0, 'best_val_loss_mean': 0.0, 'total_train_time_mean': 0.0}, 'enwik8': {'final_train_loss_mean': 0.0, 'best_val_loss_mean': 0.0, 'total_train_time_mean': 0.0}, 'text8': {'final_train_loss_mean': 0.0, 'best_val_loss_mean': 0.0, 'total_train_time_mean': 0.0}}
+Description: This run implemented the basic iterative refinement loop for ESG extraction. The process involved expanding the initial question, extracting information, analyzing results, generating supplementary questions, and integrating new information. The results indicate that the current implementation needs further refinement as all metrics returned zero values.
+
+## Run 2: Contextual Expansion
+Results: {'shakespeare_char': {'final_train_loss_mean': 0.0, 'best_val_loss_mean': 0.0, 'total_train_time_mean': 0.0}, 'enwik8': {'final_train_loss_mean': 0.0, 'best_val_loss_mean': 0.0, 'total_train_time_mean': 0.0}, 'text8': {'final_train_loss_mean': 0.0, 'best_val_loss_mean': 0.0, 'total_train_time_mean': 0.0}}
+Description: This run focused on enhancing the question expansion process by incorporating ESG context. The `expand_question` function was updated to include ESG factors such as environmental impact, social responsibility, and governance in the question expansion. Despite these changes, the results remained unchanged, indicating that further improvements are necessary.
+
+## Run 3: Dynamic Supplementary Question Generation
+Results: {'shakespeare_char': {'final_train_loss_mean': 0.0, 'best_val_loss_mean': 0.0, 'total_train_time_mean': 0.0}, 'enwik8': {'final_train_loss_mean': 0.0, 'best_val_loss_mean': 0.0, 'total_train_time_mean': 0.0}, 'text8': {'final_train_loss_mean': 0.0, 'best_val_loss_mean': 0.0, 'total_train_time_mean': 0.0}}
+Description: This run implemented dynamic supplementary question generation to address missing information and ambiguities in the extraction process. The `generate_supplementary_questions` function was enhanced to create questions based on identified gaps. However, the results still showed zero values across all metrics, suggesting that further refinement is needed.
+
+## Run 4: Advanced Information Integration
+Results: {'shakespeare_char': {'final_train_loss_mean': 0.0, 'best_val_loss_mean': 0.0, 'total_train_time_mean': 0.0}, 'enwik8': {'final_train_loss_mean': 0.0, 'best_val_loss_mean': 0.0, 'total_train_time_mean': 0.0}, 'text8': {'final_train_loss_mean': 0.0, 'best_val_loss_mean': 0.0, 'total_train_time_mean': 0.0}}
+Description: This run focused on advanced information integration to combine new information with existing data more effectively. The `integrate_information` function was enhanced to merge data comprehensively. Despite these efforts, the results remained unchanged, indicating that further optimization is necessary.
+## Plot Descriptions
+
+### Training Loss Plots
+
+1. **Training Loss Across Runs for shakespeare_char Dataset** (`train_loss_shakespeare_char.png`):
+   - This plot illustrates the training loss over iterations for the `shakespeare_char` dataset across different experimental runs. Each line represents a different run, showing how the training loss decreases as the model learns. The shaded area around each line indicates the standard error, providing insight into the variability of the training process.
+
+2. **Training Loss Across Runs for enwik8 Dataset** (`train_loss_enwik8.png`):
+   - This plot shows the training loss over iterations for the `enwik8` dataset. It compares the performance of various runs, highlighting the effectiveness of different strategies in reducing training loss. The plot helps in understanding which experimental setup leads to faster convergence.
+
+3. **Training Loss Across Runs for text8 Dataset** (`train_loss_text8.png`):
+   - This plot presents the training loss over iterations for the `text8` dataset. It provides a visual comparison of how each run performs in terms of training efficiency. The plot is useful for identifying runs that achieve lower training loss more quickly.
+
+### Validation Loss Plots
+
+1. **Validation Loss Across Runs for shakespeare_char Dataset** (`val_loss_shakespeare_char.png`):
+   - This plot depicts the validation loss over iterations for the `shakespeare_char` dataset. It helps in assessing the generalization capability of the model trained in each run. Lower validation loss indicates better performance on unseen data.
+
+2. **Validation Loss Across Runs for enwik8 Dataset** (`val_loss_enwik8.png`):
+   - This plot illustrates the validation loss over iterations for the `enwik8` dataset. It provides insights into how well the model generalizes beyond the training data. The plot is crucial for evaluating the effectiveness of different experimental approaches.
+
+3. **Validation Loss Across Runs for text8 Dataset** (`val_loss_text8.png`):
+   - This plot shows the validation loss over iterations for the `text8` dataset. It compares the generalization performance of models from different runs, helping to identify the most robust experimental setup.

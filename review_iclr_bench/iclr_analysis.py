@@ -29,10 +29,10 @@ def parse_arguments():
     parser.add_argument(
         "--model",
         type=str,
-        default="gpt-4o-2024-05-13",
+        default="gpt-4o-2024-08-06",
         choices=[
             "gpt-4o-mini-2024-07-18",
-            "gpt-4o-2024-05-13",
+            "gpt-4o-2024-08-06",
             "gpt-4o-2024-08-06",
             "llama-3-1-405b-instruct",
             "deepseek-coder-v2-0724",
@@ -253,7 +253,7 @@ def review_single_paper(
         model = args.model.split("/")[-1]
         client = anthropic.AnthropicVertex()
     elif model in [
-        "gpt-4o-2024-05-13",
+        "gpt-4o-2024-08-06",
         "gpt-4o-mini-2024-07-18",
         "gpt-4o-2024-08-06",
     ]:

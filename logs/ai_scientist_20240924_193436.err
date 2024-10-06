@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "/root_nas05/home/2022/naoki/AI-Scientist/launch_scientist.py", line 388, in <module>
+    novel_ideas = [idea for idea in ideas if idea["novel"]]
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root_nas05/home/2022/naoki/AI-Scientist/launch_scientist.py", line 388, in <listcomp>
+    novel_ideas = [idea for idea in ideas if idea["novel"]]
+                                             ~~~~^^^^^^^^^
+KeyError: 'novel'

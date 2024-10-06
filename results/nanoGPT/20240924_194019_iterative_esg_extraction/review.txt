@@ -1,0 +1,32 @@
+{
+    "Summary": "The paper proposes an iterative refinement method for ESG data extraction using a Retrieval-Augmented Generation (RAG) system. It introduces an adaptive query-response loop to iteratively refine queries and improve extraction accuracy.",
+    "Strengths": [
+        "Addresses a relevant and complex problem of ESG data extraction.",
+        "Proposes an adaptive query-response loop, which could potentially enhance data extraction processes."
+    ],
+    "Weaknesses": [
+        "The datasets used (shakespeare_char, enwik8, text8) are not relevant to ESG data, making the experimental validation unconvincing.",
+        "The experimental results lack clarity and relevance to the problem statement, with zero values in training and validation losses indicating potential issues.",
+        "Insufficient explanation of the adaptive query-response loop, which is central to the method.",
+        "No discussion on ethical concerns or limitations specific to ESG data extraction."
+    ],
+    "Originality": 2,
+    "Quality": 2,
+    "Clarity": 2,
+    "Significance": 2,
+    "Questions": [
+        "Why were shakespeare_char, enwik8, and text8 chosen for evaluating ESG data extraction?",
+        "Can the authors provide more details on the adaptive query-response loop?",
+        "How does the method address potential ethical concerns in ESG data extraction?"
+    ],
+    "Limitations": [
+        "The paper does not address the limitations of using non-ESG datasets for evaluation and lacks discussion on potential ethical concerns."
+    ],
+    "Ethical Concerns": true,
+    "Soundness": 2,
+    "Presentation": 2,
+    "Contribution": 2,
+    "Overall": 3,
+    "Confidence": 4,
+    "Decision": "Reject"
+}
