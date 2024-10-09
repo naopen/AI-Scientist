@@ -1,508 +1,176 @@
-import os
-import time
-import math
-import pickle
-import inspect
-import json
-from contextlib import nullcontext
-from dataclasses import dataclass
-import numpy as np
-import torch
-import torch.nn as nn
-from torch.nn import functional as F
 import argparse
+import torch
+from transformers import AutoTokenizer, AutoModel, pipeline
+from langchain import PromptTemplate, LLMChain
+from langchain.llms import HuggingFacePipeline
+from langchain.chains import RetrievalQA
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+import os
+import pickle
+from langchain.vectorstores import FAISS
+import json
+
+# ESGカテゴリとサブカテゴリの定義
+esg_categories = {
+    "Environmental": [
+        "気候変動対策",
+        "再生可能エネルギー",
+        "廃棄物管理",
+        "水資源管理",
+        "エネルギー効率",
+        "生物多様性",
+    ],
+    "Social": [
+        "労働条件",
+        "人権",
+        "ダイバーシティ",
+        "従業員の健康と安全",
+        "サプライチェーン管理",
+        "地域社会への貢献",
+    ],
+    "Governance": [
+        "コーポレートガバナンス",
+        "リスク管理",
+        "コンプライアンス",
+        "取締役会の構成",
+        "株主の権利",
+        "経営の透明性",
+    ],
+}
 
 
-# --- BEGIN model.py ---
-class LayerNorm(nn.Module):
-    """LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False"""
+def load_prepared_data(data_dir):
+    # ベクトルストアの読み込み
+    vectorstore = FAISS.load_local(os.path.join(data_dir, "vectorstore"))
 
-    def __init__(self, ndim, bias):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(ndim))
-        self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
+    # メタデータの読み込み
+    with open(os.path.join(data_dir, "meta.pkl"), "rb") as f:
+        meta_data = pickle.load(f)
 
-    def forward(self, input):
-        return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
+    return vectorstore, meta_data
 
 
-class CausalSelfAttention(nn.Module):
-
-    def __init__(self, config):
-        super().__init__()
-        assert config.n_embd % config.n_head == 0
-        # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
-        # output projection
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-        # regularization
-        self.attn_dropout = nn.Dropout(config.dropout)
-        self.resid_dropout = nn.Dropout(config.dropout)
-        self.n_head = config.n_head
-        self.n_embd = config.n_embd
-        self.dropout = config.dropout
-        # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
-        self.flash = hasattr(torch.nn.functional, "scaled_dot_product_attention")
-        if not self.flash:
-            print(
-                "WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0"
-            )
-            # causal mask to ensure that attention is only applied to the left in the input sequence
-            self.register_buffer(
-                "bias",
-                torch.tril(torch.ones(config.block_size, config.block_size)).view(
-                    1, 1, config.block_size, config.block_size
-                ),
-            )
-
-    def forward(self, x):
-        B, T, C = (
-            x.size()
-        )  # batch size, sequence length, embedding dimensionality (n_embd)
-
-        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(
-            1, 2
-        )  # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(
-            1, 2
-        )  # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(
-            1, 2
-        )  # (B, nh, T, hs)
-
-        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-        if self.flash:
-            # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=None,
-                dropout_p=self.dropout if self.training else 0,
-                is_causal=True,
-            )
-        else:
-            # manual implementation of attention
-            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
-            att = F.softmax(att, dim=-1)
-            att = self.attn_dropout(att)
-            y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        y = (
-            y.transpose(1, 2).contiguous().view(B, T, C)
-        )  # re-assemble all head outputs side by side
-
-        # output projection
-        y = self.resid_dropout(self.c_proj(y))
-        return y
+def setup_rag_chain(vectorstore, llm):
+    retriever = vectorstore.as_retriever()
+    qa_chain = RetrievalQA.from_chain_type(llm, retriever=retriever)
+    return qa_chain
 
 
-class MLP(nn.Module):
-
-    def __init__(self, config):
-        super().__init__()
-        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
-        self.gelu = nn.GELU()
-        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
-        self.dropout = nn.Dropout(config.dropout)
-
-    def forward(self, x):
-        x = self.c_fc(x)
-        x = self.gelu(x)
-        x = self.c_proj(x)
-        x = self.dropout(x)
-        return x
-
-
-class Block(nn.Module):
-
-    def __init__(self, config):
-        super().__init__()
-        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = CausalSelfAttention(config)
-        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
-        self.mlp = MLP(config)
-
-    def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
-        return x
-
-
-@dataclass
-class GPTConfig:
-    block_size: int = 1024
-    vocab_size: int = (
-        50304  # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
-    )
-    n_layer: int = 12
-    n_head: int = 12
-    n_embd: int = 768
-    dropout: float = 0.0
-    bias: bool = (
-        True  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+def analyze_and_generate_new_question(response, initial_question, esg_topics):
+    # SentenceTransformerを使用してより高度な類似度計算を行う
+    model = SentenceTransformer(
+        "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
     )
 
+    response_embedding = model.encode(response)
+    topic_embeddings = model.encode(esg_topics)
 
-class GPT(nn.Module):
+    similarities = cosine_similarity([response_embedding], topic_embeddings)[0]
 
-    def __init__(self, config):
-        super().__init__()
-        assert config.vocab_size is not None
-        assert config.block_size is not None
-        self.config = config
+    # 類似度が低いトピックを特定
+    low_similarity_topics = [esg_topics[i] for i in np.argsort(similarities)[:3]]
 
-        self.transformer = nn.ModuleDict(
-            dict(
-                wte=nn.Embedding(config.vocab_size, config.n_embd),
-                wpe=nn.Embedding(config.block_size, config.n_embd),
-                drop=nn.Dropout(config.dropout),
-                h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-                ln_f=LayerNorm(config.n_embd, bias=config.bias),
-            )
-        )
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        # with weight tying when using torch.compile() some warnings get generated:
-        # "UserWarning: functional_call was passed multiple values for tied weights.
-        # This behavior is deprecated and will be an error in future versions"
-        # not 100% sure what this is, so far seems to be harmless. TODO investigate
-        self.transformer.wte.weight = (
-            self.lm_head.weight
-        )  # https://paperswithcode.com/method/weight-tying
-
-        # init all weights
-        self.apply(self._init_weights)
-        # apply special scaled init to the residual projections, per GPT-2 paper
-        for pn, p in self.named_parameters():
-            if pn.endswith("c_proj.weight"):
-                torch.nn.init.normal_(
-                    p, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layer)
-                )
-
-        # report number of parameters
-        print("number of parameters: %.2fM" % (self.get_num_params() / 1e6,))
-
-    def get_num_params(self, non_embedding=True):
-        """
-        Return the number of parameters in the model.
-        For non-embedding count (default), the position embeddings get subtracted.
-        The token embeddings would too, except due to the parameter sharing these
-        params are actually used as weights in the final layer, so we include them.
-        """
-        n_params = sum(p.numel() for p in self.parameters())
-        if non_embedding:
-            n_params -= self.transformer.wpe.weight.numel()
-        return n_params
-
-    def _init_weights(self, module):
-        if isinstance(module, nn.Linear):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-            if module.bias is not None:
-                torch.nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-
-    def forward(self, idx, targets=None):
-        device = idx.device
-        b, t = idx.size()
-        assert (
-            t <= self.config.block_size
-        ), f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
-        pos = torch.arange(0, t, dtype=torch.long, device=device)  # shape (t)
-
-        # forward the GPT model itself
-        tok_emb = self.transformer.wte(idx)  # token embeddings of shape (b, t, n_embd)
-        pos_emb = self.transformer.wpe(pos)  # position embeddings of shape (t, n_embd)
-        x = self.transformer.drop(tok_emb + pos_emb)
-        for block in self.transformer.h:
-            x = block(x)
-        x = self.transformer.ln_f(x)
-
-        if targets is not None:
-            # if we are given some desired targets also calculate the loss
-            logits = self.lm_head(x)
-            loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1
-            )
-        else:
-            # inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.lm_head(
-                x[:, [-1], :]
-            )  # note: using list [-1] to preserve the time dim
-            loss = None
-
-        return logits, loss
-
-    def crop_block_size(self, block_size):
-        # model surgery to decrease the block size if necessary
-        # e.g. we may load the GPT2 pretrained model checkpoint (block size 1024)
-        # but want to use a smaller block size for some smaller, simpler model
-        assert block_size <= self.config.block_size
-        self.config.block_size = block_size
-        self.transformer.wpe.weight = nn.Parameter(
-            self.transformer.wpe.weight[:block_size]
-        )
-        for block in self.transformer.h:
-            if hasattr(block.attn, "bias"):
-                block.attn.bias = block.attn.bias[:, :, :block_size, :block_size]
-
-    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
-        # start with all of the candidate parameters
-        param_dict = {pn: p for pn, p in self.named_parameters()}
-        # filter out those that do not require grad
-        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
-        # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
-        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
-        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
-        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
-        optim_groups = [
-            {"params": decay_params, "weight_decay": weight_decay},
-            {"params": nodecay_params, "weight_decay": 0.0},
-        ]
-        num_decay_params = sum(p.numel() for p in decay_params)
-        num_nodecay_params = sum(p.numel() for p in nodecay_params)
-        print(
-            f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters"
-        )
-        print(
-            f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters"
-        )
-        # Create AdamW optimizer and use the fused version if it is available
-        fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and device_type == "cuda"
-        extra_args = dict(fused=True) if use_fused else dict()
-        optimizer = torch.optim.AdamW(
-            optim_groups, lr=learning_rate, betas=betas, **extra_args
-        )
-        print(f"using fused AdamW: {use_fused}")
-
-        return optimizer
-
-    @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
-        """
-        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
-        the sequence max_new_tokens times, feeding the predictions back into the model each time.
-        Most likely you'll want to make sure to be in model.eval() mode of operation for this.
-        """
-        for _ in range(max_new_tokens):
-            # if the sequence context is growing too long we must crop it at block_size
-            idx_cond = (
-                idx
-                if idx.size(1) <= self.config.block_size
-                else idx[:, -self.config.block_size :]
-            )
-            # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond)
-            # pluck the logits at the final step and scale by desired temperature
-            logits = logits[:, -1, :] / temperature
-            # optionally crop the logits to only the top k options
-            if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float("Inf")
-            # apply softmax to convert logits to (normalized) probabilities
-            probs = F.softmax(logits, dim=-1)
-            # sample from the distribution
-            idx_next = torch.multinomial(probs, num_samples=1)
-            # append sampled index to the running sequence and continue
-            idx = torch.cat((idx, idx_next), dim=1)
-
-        return idx
-
-
-# --- END model.py ---
-def train(dataset="esg", out_dir="out", seed_offset=0):
-    # データの設定
-    gradient_accumulation_steps = 1
-    batch_size = 64
-    block_size = 256
-    # I/O
-    eval_interval = 250
-    log_interval = 10
-    eval_iters = 200
-    eval_only = False
-    always_save_checkpoint = True
-    # モデル
-    n_layer = 6
-    n_head = 6
-    n_embd = 384
-    dropout = 0.2
-    bias = False
-    # Adamオプティマイザー
-    learning_rate = 6e-4
-    max_iters = 5000
-    weight_decay = 1e-1
-    beta1 = 0.9
-    beta2 = 0.95
-    grad_clip = 1.0
-    # 学習率の減衰設定
-    decay_lr = True
-    warmup_iters = 100
-    lr_decay_iters = 5000
-    min_lr = 6e-5
-    # DDP設定
-    backend = "nccl"
-    # システム
-    device = "cuda"
-    dtype = (
-        "bfloat16"
-        if torch.cuda.is_available() and torch.cuda.is_bf16_supported()
-        else "float16"
+    # 新しい質問を生成（日本語のDeBERTaモデルを使用）
+    question_generator = pipeline(
+        "text-generation", model="izumi-lab/deberta-v2-base-japanese"
     )
-    compile = True
+    new_question_prompt = f"初期質問「{initial_question}」と回答に基づいて、{', '.join(low_similarity_topics)}に関する追加の質問を生成してください。"
+    new_question = question_generator(
+        new_question_prompt, max_length=100, num_return_sequences=1
+    )[0]["generated_text"]
 
-    # poor man's data loader
-    if out_dir == "run_0":
-        data_dir = os.path.join("../../data", dataset)
-    else:
-        data_dir = os.path.join("../../../data", dataset)
+    return new_question, similarities
 
-    train_data = np.memmap(
-        os.path.join(data_dir, "train.bin"), dtype=np.uint16, mode="r"
-    )
-    val_data = np.memmap(os.path.join(data_dir, "val.bin"), dtype=np.uint16, mode="r")
 
-    def get_batch(split):
-        data = train_data if split == "train" else val_data
-        ix = torch.randint(len(data) - block_size, (batch_size,))
-        x = torch.stack(
-            [torch.from_numpy((data[i : i + block_size]).astype(np.int64)) for i in ix]
+def iterative_extraction(qa_chain, initial_question, max_iterations=3):
+    current_question = initial_question
+    all_responses = []
+    iteration_quality = []
+
+    esg_topics = [topic for category in esg_categories.values() for topic in category]
+
+    for i in range(max_iterations):
+        response = qa_chain.run(current_question)
+        all_responses.append(response)
+
+        new_question, similarities = analyze_and_generate_new_question(
+            response, initial_question, esg_topics
         )
-        y = torch.stack(
-            [
-                torch.from_numpy((data[i + 1 : i + 1 + block_size]).astype(np.int64))
-                for i in ix
-            ]
-        )
-        if device_type == "cuda":
-            x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(
-                device, non_blocking=True
-            )
-        else:
-            x, y = x.to(device), y.to(device)
-        return x, y
+        current_question = new_question
 
-    # モデルの初期化
-    model_args = dict(
-        n_layer=n_layer,
-        n_head=n_head,
-        n_embd=n_embd,
-        block_size=block_size,
-        bias=bias,
-        vocab_size=None,
-        dropout=dropout,
-    )
-    gptconf = GPTConfig(**model_args)
-    model = GPT(gptconf)
-    model.to(device)
+        # イテレーションの品質を計算（ここでは単純に平均類似度を使用）
+        iteration_quality.append(np.mean(similarities))
 
-    # 学習レート減衰のスケジューラー
-    def get_lr(it):
-        # 1) linear warmup for warmup_iters steps
-        if it < warmup_iters:
-            return learning_rate * it / warmup_iters
-        # 2) if it > lr_decay_iters, return min learning rate
-        if it > lr_decay_iters:
-            return min_lr
-        # 3) in between, use cosine decay down to min learning rate
-        decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
-        assert 0 <= decay_ratio <= 1
-        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff ranges 0..1
-        return min_lr + coeff * (learning_rate - min_lr)
+    final_response = "\n\n".join(all_responses)
+    return final_response, iteration_quality
 
-    # オプティマイザーの初期化
-    optimizer = model.configure_optimizers(
-        weight_decay, learning_rate, (beta1, beta2), device_type
+
+def main():
+    data_dir = "/root_nas05/home/2022/naoki/AI-Scientist/data/esg"
+    output_dir = "/root_nas05/home/2022/naoki/AI-Scientist/templates/esg"
+
+    vectorstore, meta_data = load_prepared_data(data_dir)
+
+    # 日本語のDeBERTaモデルを使用
+    tokenizer = AutoTokenizer.from_pretrained("izumi-lab/deberta-v2-base-japanese")
+    model = AutoModel.from_pretrained("izumi-lab/deberta-v2-base-japanese")
+    llm = HuggingFacePipeline.from_model_id(
+        model_id="izumi-lab/deberta-v2-base-japanese",
+        task="text-generation",
+        model=model,
+        tokenizer=tokenizer,
+        device=0 if torch.cuda.is_available() else -1,
     )
 
-    # トレーニングループ
-    X, Y = get_batch("train")
-    t0 = time.time()
-    local_iter_num = 0
-    raw_model = model
-    running_mfu = -1.0
-    while True:
-        # 学習率の決定と設定
-        lr = get_lr(iter_num) if decay_lr else learning_rate
-        for param_group in optimizer.param_groups:
-            param_group["lr"] = lr
+    qa_chain = setup_rag_chain(vectorstore, llm)
 
-        # 評価
-        if iter_num % eval_interval == 0:
-            losses = estimate_loss()
-            print(
-                f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}"
+    initial_question = "このレポートで議論されている主要なESG要因は何で、それらが投資判断にどのような影響を与える可能性がありますか？"
+    final_response, iteration_quality = iterative_extraction(qa_chain, initial_question)
+
+    with open(
+        os.path.join(output_dir, "esg_analysis_result.txt"), "w", encoding="utf-8"
+    ) as f:
+        f.write(final_response)
+
+    topic_coverage = evaluate_extraction(
+        final_response,
+        [topic for category in esg_categories.values() for topic in category],
+    )
+
+    # 結果をJSONファイルに保存
+    results = {
+        "topic_coverage": dict(
+            zip(
+                [topic for category in esg_categories.values() for topic in category],
+                topic_coverage,
             )
-            if losses["val"] < best_val_loss or always_save_checkpoint:
-                best_val_loss = losses["val"]
-                if iter_num > 0:
-                    checkpoint = {
-                        "model": raw_model.state_dict(),
-                        "optimizer": optimizer.state_dict(),
-                        "model_args": model_args,
-                        "iter_num": iter_num,
-                        "best_val_loss": best_val_loss,
-                        "config": config,
-                    }
-                    print(f"saving checkpoint to {out_dir}")
-                    torch.save(checkpoint, os.path.join(out_dir, "ckpt.pt"))
-        if iter_num == 0 and eval_only:
-            break
+        ),
+        "iteration_quality": iteration_quality,
+    }
+    with open(
+        os.path.join(output_dir, "esg_analysis_results.json"), "w", encoding="utf-8"
+    ) as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
 
-        # 前方伝播
-        logits, loss = model(X, Y)
 
-        # バックワード伝播
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        optimizer.step()
-        optimizer.zero_grad(set_to_none=True)
+def evaluate_extraction(final_response, esg_topics):
+    model = SentenceTransformer(
+        "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+    )
 
-        # タイミングとロギング
-        t1 = time.time()
-        dt = t1 - t0
-        t0 = t1
-        if iter_num % log_interval == 0:
-            lossf = loss.item()
-            print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms")
-        iter_num += 1
-        local_iter_num += 1
+    response_embedding = model.encode(final_response)
+    topic_embeddings = model.encode(esg_topics)
 
-        # 終了条件のチェック
-        if iter_num > max_iters:
-            break
+    similarities = cosine_similarity([response_embedding], topic_embeddings)[0]
 
-    return model
+    print("ESGトピックのカバレッジ:")
+    for topic, similarity in zip(esg_topics, similarities):
+        print(f"{topic}: {similarity:.2f}")
+
+    return similarities.tolist()
 
 
 if __name__ == "__main__":
-    # コマンドライン引数の解析
-    parser = argparse.ArgumentParser(description="Run the training")
-    parser.add_argument("--out_dir", type=str, default="out", help="Output directory")
-    args = parser.parse_args()
-
-    # 実験の実行
-    out_dir = args.out_dir
-    os.makedirs(out_dir, exist_ok=True)
-
-    # データセットとシード数の設定
-    datasets = ["esg"]
-    num_seeds = {"esg": 3}
-
-    all_results = {}
-    for dataset in datasets:
-        for seed_offset in range(num_seeds[dataset]):
-            model = train(dataset, out_dir, seed_offset)
-
-            # ESG特有の評価を行う（例：特定のESGキーワードの生成確率など）
-            esg_eval_results = evaluate_esg(model, dataset)
-
-            all_results[f"{dataset}_{seed_offset}"] = esg_eval_results
-
-    # 結果の保存
-    with open(os.path.join(out_dir, "all_results.json"), "w") as f:
-        json.dump(all_results, f)
-
-    print("Training and evaluation completed.")
+    main()
