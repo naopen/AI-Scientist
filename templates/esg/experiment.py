@@ -313,74 +313,45 @@ class GPT(nn.Module):
 
 
 # --- END model.py ---
-def train(dataset="shakespeare_char", out_dir="run_0", seed_offset=0):
-    # -----------------------------------------------------------------------------
-    # default config values designed to train a gpt2 (124M) on OpenWebText
-    # data
+def train(dataset="esg", out_dir="out", seed_offset=0):
+    # データの設定
     gradient_accumulation_steps = 1
-    batch_size = 64 if dataset == "shakespeare_char" else 32
-    block_size = 256  # context of up to 256 previous characters
+    batch_size = 64
+    block_size = 256
     # I/O
-    eval_interval = 250 if dataset == "shakespeare_char" else 1000
-    log_interval = 10 if dataset == "shakespeare_char" else 100
+    eval_interval = 250
+    log_interval = 10
     eval_iters = 200
-    eval_only = False  # if True, script exits right after the first eval
-    always_save_checkpoint = False  # we expect to overfit on this small dataset, so only save when val improves
-    never_save_checkpoint = True  # never save checkpoints
-    # model
-    n_layer = 6  # baby GPT model :)
+    eval_only = False
+    always_save_checkpoint = True
+    # モデル
+    n_layer = 6
     n_head = 6
     n_embd = 384
-    dropout = 0.2  # for pretraining 0 is good, for finetuning try 0.1+
-    bias = False  # do we use bias inside LayerNorm and Linear layers?
-    # adamw optimizer
-    learning_rate = 1e-3 if dataset == "shakespeare_char" else 5e-4
-    max_iters = 5000 if dataset == "shakespeare_char" else 100000
+    dropout = 0.2
+    bias = False
+    # Adamオプティマイザー
+    learning_rate = 6e-4
+    max_iters = 5000
     weight_decay = 1e-1
     beta1 = 0.9
-    beta2 = 0.99  # make a bit bigger because number of tokens per iter is small
-    grad_clip = 1.0  # clip gradients at this value, or disable if == 0.0
-    # learning rate decay settings
-    decay_lr = True  # whether to decay the learning rate
-    warmup_iters = 100 if dataset == "shakespeare_char" else 200
-    lr_decay_iters = max_iters  # make equal to max_iters usually
-    min_lr = 1e-4 if dataset == "shakespeare_char" else 5e-5
-    # DDP settings
-    backend = "nccl"  # 'nccl', 'gloo', etc.
-    # system
-    device = "cuda"  # Always use CUDA
+    beta2 = 0.95
+    grad_clip = 1.0
+    # 学習率の減衰設定
+    decay_lr = True
+    warmup_iters = 100
+    lr_decay_iters = 5000
+    min_lr = 6e-5
+    # DDP設定
+    backend = "nccl"
+    # システム
+    device = "cuda"
     dtype = (
         "bfloat16"
         if torch.cuda.is_available() and torch.cuda.is_bf16_supported()
         else "float16"
-    )  # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
-    compile = True  # do not torch compile the model on macbooks
-
-    # various inits, derived attributes, I/O setup
-    # if not ddp, we are running on a single gpu, and one process
-    master_process = True
-    tokens_per_iter = gradient_accumulation_steps * batch_size * block_size
-    print(f"tokens per iteration will be: {tokens_per_iter:,}")
-
-    if master_process:
-        os.makedirs(out_dir, exist_ok=True)
-    torch.manual_seed(1337 + seed_offset)
-    torch.backends.cuda.matmul.allow_tf32 = True  # allow tf32 on matmul
-    torch.backends.cudnn.allow_tf32 = True  # allow tf32 on cudnn
-    device_type = (
-        "cuda" if "cuda" in device else "cpu"
-    )  # for later use in torch.autocast
-    # note: float16 data type will automatically use a GradScaler
-    ptdtype = {
-        "float32": torch.float32,
-        "bfloat16": torch.bfloat16,
-        "float16": torch.float16,
-    }[dtype]
-    ctx = (
-        nullcontext()
-        if device_type == "cpu"
-        else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
     )
+    compile = True
 
     # poor man's data loader
     if out_dir == "run_0":
@@ -388,17 +359,13 @@ def train(dataset="shakespeare_char", out_dir="run_0", seed_offset=0):
     else:
         data_dir = os.path.join("../../../data", dataset)
 
+    train_data = np.memmap(
+        os.path.join(data_dir, "train.bin"), dtype=np.uint16, mode="r"
+    )
+    val_data = np.memmap(os.path.join(data_dir, "val.bin"), dtype=np.uint16, mode="r")
+
     def get_batch(split):
-        # We recreate np.memmap every batch to avoid a memory leak, as per
-        # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
-        if split == "train":
-            data = np.memmap(
-                os.path.join(data_dir, "train.bin"), dtype=np.uint16, mode="r"
-            )
-        else:
-            data = np.memmap(
-                os.path.join(data_dir, "val.bin"), dtype=np.uint16, mode="r"
-            )
+        data = train_data if split == "train" else val_data
         ix = torch.randint(len(data) - block_size, (batch_size,))
         x = torch.stack(
             [torch.from_numpy((data[i : i + block_size]).astype(np.int64)) for i in ix]
@@ -410,7 +377,6 @@ def train(dataset="shakespeare_char", out_dir="run_0", seed_offset=0):
             ]
         )
         if device_type == "cuda":
-            # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
             x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(
                 device, non_blocking=True
             )
@@ -418,19 +384,7 @@ def train(dataset="shakespeare_char", out_dir="run_0", seed_offset=0):
             x, y = x.to(device), y.to(device)
         return x, y
 
-    iter_num = 0
-    best_val_loss = 1e9
-
-    # attempt to derive vocab_size from the dataset
-    meta_path = os.path.join(data_dir, "meta.pkl")
-    meta_vocab_size = None
-    if os.path.exists(meta_path):
-        with open(meta_path, "rb") as f:
-            meta = pickle.load(f)
-        meta_vocab_size = meta["vocab_size"]
-        print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
-
-    # model init
+    # モデルの初期化
     model_args = dict(
         n_layer=n_layer,
         n_head=n_head,
@@ -439,57 +393,12 @@ def train(dataset="shakespeare_char", out_dir="run_0", seed_offset=0):
         bias=bias,
         vocab_size=None,
         dropout=dropout,
-    )  # start with model_args from command line
-    # init a new model from scratch
-    print("Initializing a new model from scratch")
-    # determine the vocab size we'll use for from-scratch training
-    if meta_vocab_size is None:
-        print(
-            "defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)"
-        )
-    model_args["vocab_size"] = meta_vocab_size if meta_vocab_size is not None else 50304
+    )
     gptconf = GPTConfig(**model_args)
     model = GPT(gptconf)
-    # crop down the model block size if desired, using model surgery
-    if block_size < model.config.block_size:
-        model.crop_block_size(block_size)
-        model_args["block_size"] = (
-            block_size  # so that the checkpoint will have the right value
-        )
     model.to(device)
 
-    # initialize a GradScaler. If enabled=False scaler is a no-op
-    scaler = torch.cuda.amp.GradScaler(enabled=(dtype == "float16"))
-
-    # optimizer
-    optimizer = model.configure_optimizers(
-        weight_decay, learning_rate, (beta1, beta2), device_type
-    )
-    checkpoint = None  # free up memory
-
-    # compile the model
-    if compile:
-        print("compiling the model... (takes a ~minute)")
-        unoptimized_model = model
-        model = torch.compile(model)  # requires PyTorch 2.0
-
-    # helps estimate an arbitrarily accurate loss over either split using many batches
-    @torch.no_grad()
-    def estimate_loss():
-        out = {}
-        model.eval()
-        for split in ["train", "val"]:
-            losses = torch.zeros(eval_iters)
-            for k in range(eval_iters):
-                X, Y = get_batch(split)
-                with ctx:
-                    logits, loss = model(X, Y)
-                losses[k] = loss.item()
-            out[split] = losses.mean()
-        model.train()
-        return out
-
-    # learning rate decay scheduler (cosine with warmup)
+    # 学習レート減衰のスケジューラー
     def get_lr(it):
         # 1) linear warmup for warmup_iters steps
         if it < warmup_iters:
@@ -503,217 +412,97 @@ def train(dataset="shakespeare_char", out_dir="run_0", seed_offset=0):
         coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff ranges 0..1
         return min_lr + coeff * (learning_rate - min_lr)
 
-    # logging
-    val_log_info = []
-    train_log_info = []
+    # オプティマイザーの初期化
+    optimizer = model.configure_optimizers(
+        weight_decay, learning_rate, (beta1, beta2), device_type
+    )
 
-    # training loop
-    X, Y = get_batch("train")  # fetch the very first batch
-    og_t0 = time.time()
+    # トレーニングループ
+    X, Y = get_batch("train")
     t0 = time.time()
-    local_iter_num = 0  # number of iterations in the lifetime of this process
+    local_iter_num = 0
     raw_model = model
+    running_mfu = -1.0
     while True:
-
-        # determine and set the learning rate for this iteration
+        # 学習率の決定と設定
         lr = get_lr(iter_num) if decay_lr else learning_rate
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
 
-        # evaluate the loss on train/val sets and write checkpoints
-        if iter_num % eval_interval == 0 and master_process:
+        # 評価
+        if iter_num % eval_interval == 0:
             losses = estimate_loss()
             print(
                 f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}"
             )
-            val_log_info.append(
-                {
-                    "iter": iter_num,
-                    "train/loss": losses["train"].item(),
-                    "val/loss": losses["val"].item(),
-                    "lr": lr,
-                }
-            )
             if losses["val"] < best_val_loss or always_save_checkpoint:
                 best_val_loss = losses["val"]
-                if iter_num > 0 and not never_save_checkpoint:
+                if iter_num > 0:
                     checkpoint = {
                         "model": raw_model.state_dict(),
                         "optimizer": optimizer.state_dict(),
                         "model_args": model_args,
                         "iter_num": iter_num,
                         "best_val_loss": best_val_loss,
+                        "config": config,
                     }
                     print(f"saving checkpoint to {out_dir}")
                     torch.save(checkpoint, os.path.join(out_dir, "ckpt.pt"))
         if iter_num == 0 and eval_only:
             break
 
-        # forward backward update, with optional gradient accumulation to simulate larger batch size
-        # and using the GradScaler if data type is float16
-        for micro_step in range(gradient_accumulation_steps):
-            with ctx:
-                logits, loss = model(X, Y)
-                loss = (
-                    loss / gradient_accumulation_steps
-                )  # scale the loss to account for gradient accumulation
-            # immediately async prefetch next batch while model is doing the forward pass on the GPU
-            X, Y = get_batch("train")
-            # backward pass, with gradient scaling if training in fp16
-            scaler.scale(loss).backward()
-        # clip the gradient
-        if grad_clip != 0.0:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        # step the optimizer and scaler if training in fp16
-        scaler.step(optimizer)
-        scaler.update()
-        # flush the gradients as soon as we can, no need for this memory anymore
+        # 前方伝播
+        logits, loss = model(X, Y)
+
+        # バックワード伝播
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        optimizer.step()
         optimizer.zero_grad(set_to_none=True)
 
-        # timing and logging
+        # タイミングとロギング
         t1 = time.time()
         dt = t1 - t0
         t0 = t1
-        if iter_num % log_interval == 0 and master_process:
-            # get loss as float. note: this is a CPU-GPU sync point
-            # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
-            lossf = loss.item() * gradient_accumulation_steps
+        if iter_num % log_interval == 0:
+            lossf = loss.item()
             print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms")
-            train_log_info.append(
-                {
-                    "iter": iter_num,
-                    "loss": lossf,
-                    "time": dt * 1000,
-                }
-            )
         iter_num += 1
         local_iter_num += 1
 
-        # termination conditions
+        # 終了条件のチェック
         if iter_num > max_iters:
             break
 
-    print("training done")
-    print(f"Best validation loss: {best_val_loss}")
-    print(f"Total train time: {(time.time() - og_t0) / 60:.2f} mins")
+    return model
 
-    final_info = {
-        "final_train_loss": lossf,
-        "best_val_loss": best_val_loss.item(),
-        "total_train_time": time.time() - og_t0,
-    }
-
-    # === SAMPLING SCRIPT ===
-
-    # New parameters for generation
-    start = " "
-    num_samples = 10  # number of samples to draw
-    max_new_tokens = 500  # number of tokens generated in each sample
-    temperature = (
-        0.8  # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
-    )
-    top_k = 200  # retain only the top_k most likely tokens, clamp others to have 0 probability
-
-    # Encoding setup
-    assert os.path.exists(
-        meta_path
-    ), "meta.pkl not found, please run training script first"
-    print(f"Loading meta from {meta_path}...")
-    with open(meta_path, "rb") as f:
-        meta = pickle.load(f)
-    stoi, itos = meta["stoi"], meta["itos"]
-    encode = lambda s: [stoi[c] for c in s]
-    decode = lambda l: "".join([itos[i] for i in l])
-
-    # Encode the beginning of the prompt
-    if start.startswith("FILE:"):
-        with open(start[5:], "r", encoding="utf-8") as f:
-            start = f.read()
-    start_ids = encode(start)
-    x = torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...]
-
-    # Run generation
-    model.eval()
-    results = []
-    with torch.no_grad():
-        with ctx:
-            for k in range(num_samples):
-                start_time = time.time()
-                y = model.generate(
-                    x, max_new_tokens, temperature=temperature, top_k=top_k
-                )
-                end_time = time.time()
-
-                generated_text = decode(y[0].tolist())
-                inference_time = end_time - start_time
-                tokens_per_second = max_new_tokens / inference_time
-
-                print(f"Sample {k+1}:")
-                print(generated_text)
-                print(f"Inference time: {inference_time:.2f} seconds")
-                print(f"Tokens per second: {tokens_per_second:.2f}")
-                print("---------------")
-
-                results.append(
-                    {
-                        "sample_id": k + 1,
-                        "generated_text": generated_text,
-                        "inference_time": inference_time,
-                        "tokens_per_second": tokens_per_second,
-                    }
-                )
-
-    # Calculate and print average inference speed
-    avg_tokens_per_second = sum(r["tokens_per_second"] for r in results) / len(results)
-    print(f"Average tokens per second: {avg_tokens_per_second:.2f}")
-
-    final_info["avg_inference_tokens_per_second"] = avg_tokens_per_second
-
-    with open(
-        os.path.join(out_dir, f"final_info_{dataset}_{seed_offset}.json"), "w"
-    ) as f:
-        json.dump(final_info, f)
-    return final_info, train_log_info, val_log_info
-
-
-parser = argparse.ArgumentParser(description="Run experiment")
-parser.add_argument("--out_dir", type=str, default="run_0", help="Output directory")
-args = parser.parse_args()
 
 if __name__ == "__main__":
-    num_seeds = {
-        "shakespeare_char": 3,
-        "enwik8": 1,
-        "text8": 1,
-    }
+    # コマンドライン引数の解析
+    parser = argparse.ArgumentParser(description="Run the training")
+    parser.add_argument("--out_dir", type=str, default="out", help="Output directory")
+    args = parser.parse_args()
 
+    # 実験の実行
     out_dir = args.out_dir
+    os.makedirs(out_dir, exist_ok=True)
+
+    # データセットとシード数の設定
+    datasets = ["esg"]
+    num_seeds = {"esg": 3}
+
     all_results = {}
-    final_infos = {}
-    for dataset in ["shakespeare_char", "enwik8", "text8"]:
-        final_info_list = []
+    for dataset in datasets:
         for seed_offset in range(num_seeds[dataset]):
-            final_info, train_info, val_info = train(dataset, out_dir, seed_offset)
-            all_results[f"{dataset}_{seed_offset}_final_info"] = final_info
-            all_results[f"{dataset}_{seed_offset}_train_info"] = train_info
-            all_results[f"{dataset}_{seed_offset}_val_info"] = val_info
-            final_info_list.append(final_info)
-        final_info_dict = {
-            k: [d[k] for d in final_info_list] for k in final_info_list[0].keys()
-        }
-        means = {f"{k}_mean": np.mean(v) for k, v in final_info_dict.items()}
-        stderrs = {
-            f"{k}_stderr": np.std(v) / len(v) for k, v in final_info_dict.items()
-        }
-        final_infos[dataset] = {
-            "means": means,
-            "stderrs": stderrs,
-            "final_info_dict": final_info_dict,
-        }
+            model = train(dataset, out_dir, seed_offset)
 
-    with open(os.path.join(out_dir, "final_info.json"), "w") as f:
-        json.dump(final_infos, f)
+            # ESG特有の評価を行う（例：特定のESGキーワードの生成確率など）
+            esg_eval_results = evaluate_esg(model, dataset)
 
-    with open(os.path.join(out_dir, "all_results.npy"), "wb") as f:
-        np.save(f, all_results)
+            all_results[f"{dataset}_{seed_offset}"] = esg_eval_results
+
+    # 結果の保存
+    with open(os.path.join(out_dir, "all_results.json"), "w") as f:
+        json.dump(all_results, f)
+
+    print("Training and evaluation completed.")

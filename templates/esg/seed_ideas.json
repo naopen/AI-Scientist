@@ -1,0 +1,11 @@
+[
+  {
+    "Name": "iterative_esg_extraction_for_investment_relevance",
+    "Title": "Iterative Refinement for Investment-Relevant ESG Extraction: Adaptive Query-Response Loop with Automated Evaluation",
+    "Experiment": "Implement an iterative question refinement and information extraction loop in the RAG system, tailored for extracting investment-relevant ESG information. This process consists of the following steps:\n1. Receive an initial ESG-related question\n2. Automatically expand and refine the question considering ESG context and potential investment relevance\n3. Perform initial information extraction using the expanded question\n4. Analyze the extraction results to identify missing information or ambiguities\n5. Generate new supplementary questions based on identified issues\n6. Perform additional information extraction using supplementary questions\n7. Integrate new information to create a comprehensive answer\n8. Evaluate the extracted information using automated metrics and a pre-defined rubric\n9. Repeat steps 4-8 as necessary, based on the evaluation results\n10. Provide a final summary of ESG insights, highlighting potential investment relevance\n\nTo evaluate the effectiveness of this approach:\n- Use a test set of ESG reports with pre-annotated key information and compare the extraction accuracy\n- Employ existing ESG scoring systems or indices as a benchmark to assess the relevance of extracted information\n- Conduct a comparative analysis with baseline methods using standard NLP evaluation metrics\n- Perform a case study analysis on a subset of companies to demonstrate the depth and quality of extracted ESG information",
+    "Interestingness": 8,
+    "Feasibility": 8,
+    "Novelty": 7,
+    "novel": true
+  }
+]
