@@ -1,15 +1,15 @@
 import argparse
 import torch
 from transformers import AutoTokenizer, AutoModel, pipeline
-from langchain import PromptTemplate, LLMChain
-from langchain.llms import HuggingFacePipeline
-from langchain.chains import RetrievalQA
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain, RetrievalQA
+from langchain_community.llms import HuggingFacePipeline
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 import os
 import pickle
-from langchain.vectorstores import FAISS
+from langchain_community.vectorstores import FAISS
 import json
 
 # ESGカテゴリとサブカテゴリの定義
@@ -42,8 +42,18 @@ esg_categories = {
 
 
 def load_prepared_data(data_dir):
+    # エンベディングモデルのインスタンスを作成
+    embeddings = SentenceTransformer(
+        "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+    )
+
     # ベクトルストアの読み込み
-    vectorstore = FAISS.load_local(os.path.join(data_dir, "vectorstore"))
+    # 注意: allow_dangerous_deserialization=True は信頼できるデータソースでのみ使用してください
+    vectorstore = FAISS.load_local(
+        os.path.join(data_dir, "vectorstore"),
+        embeddings=embeddings,
+        allow_dangerous_deserialization=True,  # この行を追加
+    )
 
     # メタデータの読み込み
     with open(os.path.join(data_dir, "meta.pkl"), "rb") as f:
