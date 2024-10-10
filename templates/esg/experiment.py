@@ -3,12 +3,13 @@ import torch
 from transformers import (
     AutoTokenizer,
     AutoModelForQuestionAnswering,
-    AutoModelForSeq2SeqLM,
+    AutoModelForCausalLM,
     pipeline,
 )
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain, RetrievalQA
 from langchain_community.llms import HuggingFacePipeline
+from langchain.embeddings import HuggingFaceEmbeddings
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -47,49 +48,59 @@ esg_categories = {
 
 
 def load_prepared_data(data_dir):
-    # エンベディングモデルのインスタンスを作成
-    embeddings = SentenceTransformer(
-        "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+    embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
     )
-
-    # ベクトルストアの読み込み
     vectorstore = FAISS.load_local(
         os.path.join(data_dir, "vectorstore"),
         embeddings=embeddings,
         allow_dangerous_deserialization=True,
     )
-
-    # メタデータの読み込み
     with open(os.path.join(data_dir, "meta.pkl"), "rb") as f:
         meta_data = pickle.load(f)
-
     return vectorstore, meta_data
 
 
-def setup_rag_chain(vectorstore, qa_model, summarizer, generator):
+def setup_swallow_model():
+    model_name = "tokyotech-llm/Swallow-MX-8x7b-NVE-v0.1"
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name, torch_dtype=torch.bfloat16, device_map="auto"
+    )
+
+    def generate_text(prompt, max_new_tokens=128):
+        input_ids = tokenizer.encode(
+            prompt, add_special_tokens=False, return_tensors="pt"
+        )
+        tokens = model.generate(
+            input_ids.to(device=model.device),
+            max_new_tokens=max_new_tokens,
+            temperature=0.99,
+            top_p=0.95,
+            do_sample=True,
+        )
+        return tokenizer.decode(tokens[0], skip_special_tokens=True)
+
+    return generate_text
+
+
+def setup_rag_chain(vectorstore, qa_model, generate_text):
     retriever = vectorstore.as_retriever()
 
     def rag_chain(query):
-        # 関連文書の取得
         docs = retriever.get_relevant_documents(query)
         context = " ".join([doc.page_content for doc in docs])
 
-        # 質問応答
         qa_input = f"コンテキスト: {context}\n質問: {query}"
         qa_result = qa_model(qa_input)
 
-        # 要約
-        summary = summarizer(
-            qa_result["answer"], max_length=150, min_length=50, do_sample=False
-        )[0]["summary_text"]
+        summary_prompt = f"以下の文章を要約してください：\n{qa_result['answer']}"
+        summary = generate_text(summary_prompt)
 
-        # 投資判断に関連する洞察の生成
-        prompt = (
+        insight_prompt = (
             f"以下の情報に基づいて、投資判断に役立つ洞察を生成してください：\n{summary}"
         )
-        insights = generator(prompt, max_length=200, num_return_sequences=1)[0][
-            "generated_text"
-        ]
+        insights = generate_text(insight_prompt)
 
         return f"回答: {qa_result['answer']}\n\n要約: {summary}\n\n投資洞察: {insights}"
 
@@ -97,9 +108,8 @@ def setup_rag_chain(vectorstore, qa_model, summarizer, generator):
 
 
 def analyze_and_generate_new_question(
-    response, initial_question, esg_topics, generator
+    response, initial_question, esg_topics, generate_text
 ):
-    # SentenceTransformerを使用してより高度な類似度計算を行う
     model = SentenceTransformer(
         "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
     )
@@ -109,19 +119,15 @@ def analyze_and_generate_new_question(
 
     similarities = cosine_similarity([response_embedding], topic_embeddings)[0]
 
-    # 類似度が低いトピックを特定
     low_similarity_topics = [esg_topics[i] for i in np.argsort(similarities)[:3]]
 
-    # 新しい質問を生成
     new_question_prompt = f"初期質問「{initial_question}」と回答に基づいて、{', '.join(low_similarity_topics)}に関する追加の質問を生成してください。"
-    new_question = generator(
-        new_question_prompt, max_length=100, num_return_sequences=1
-    )[0]["generated_text"]
+    new_question = generate_text(new_question_prompt, max_new_tokens=100)
 
     return new_question, similarities
 
 
-def iterative_extraction(rag_chain, initial_question, generator, max_iterations=3):
+def iterative_extraction(rag_chain, initial_question, generate_text, max_iterations=3):
     current_question = initial_question
     all_responses = []
     iteration_quality = []
@@ -133,11 +139,10 @@ def iterative_extraction(rag_chain, initial_question, generator, max_iterations=
         all_responses.append(response)
 
         new_question, similarities = analyze_and_generate_new_question(
-            response, initial_question, esg_topics, generator
+            response, initial_question, esg_topics, generate_text
         )
         current_question = new_question
 
-        # イテレーションの品質を計算（ここでは単純に平均類似度を使用）
         iteration_quality.append(np.mean(similarities))
 
     final_response = "\n\n".join(all_responses)
@@ -167,21 +172,17 @@ def main():
 
     vectorstore, meta_data = load_prepared_data(data_dir)
 
-    # モデルの設定
     qa_model = pipeline(
         "question-answering",
-        model="cl-tohoku/bert-base-japanese-whole-word-masking-squad",
+        model="tsmatz/roberta_qa_japanese",
     )
-    summarizer = pipeline(
-        "summarization", model="ku-nlp/deberta-v2-base-japanese-squad"
-    )
-    generator = pipeline("text-generation", model="rinna/japanese-gpt-neox-3.6b")
+    generate_text = setup_swallow_model()
 
-    rag_chain = setup_rag_chain(vectorstore, qa_model, summarizer, generator)
+    rag_chain = setup_rag_chain(vectorstore, qa_model, generate_text)
 
     initial_question = "このレポートで議論されている主要なESG要因は何で、それらが投資判断にどのような影響を与える可能性がありますか？"
     final_response, iteration_quality = iterative_extraction(
-        rag_chain, initial_question, generator
+        rag_chain, initial_question, generate_text
     )
 
     with open(
@@ -194,7 +195,6 @@ def main():
         [topic for category in esg_categories.values() for topic in category],
     )
 
-    # 結果をJSONファイルに保存
     results = {
         "topic_coverage": dict(
             zip(
