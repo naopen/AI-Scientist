@@ -18,6 +18,7 @@ import pickle
 from langchain_community.vectorstores import FAISS
 import json
 import time
+from datetime import datetime
 
 # Intel MKLを使用するための環境変数を設定
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
@@ -186,6 +187,9 @@ def main(output_dir):
     print("ESG分析を開始します...")
     start_time = time.time()
 
+    # 現在の日時を取得
+    current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+
     data_dir = "/root_nas05/home/2022/naoki/AI-Scientist/data/esg"
     os.makedirs(output_dir, exist_ok=True)
 
@@ -212,7 +216,9 @@ def main(output_dir):
 
     print("結果をファイルに書き込んでいます...")
     with open(
-        os.path.join(output_dir, "esg_analysis_result.txt"), "w", encoding="utf-8"
+        os.path.join(output_dir, f"esg_analysis_result_{current_time}.txt"),
+        "w",
+        encoding="utf-8",
     ) as f:
         f.write("ESG分析結果:\n\n")
         f.write(f"初期質問: {initial_question}\n\n")
@@ -239,13 +245,17 @@ def main(output_dir):
 
     print("評価結果をJSONファイルに書き込んでいます...")
     with open(
-        os.path.join(output_dir, "esg_analysis_results.json"), "w", encoding="utf-8"
+        os.path.join(output_dir, f"esg_analysis_results_{current_time}.json"),
+        "w",
+        encoding="utf-8",
     ) as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
 
     # 評価結果をより明確なテキストファイルとしても出力
     with open(
-        os.path.join(output_dir, "esg_analysis_summary.txt"), "w", encoding="utf-8"
+        os.path.join(output_dir, f"esg_analysis_summary_{current_time}.txt"),
+        "w",
+        encoding="utf-8",
     ) as f:
         f.write("ESG分析評価結果サマリー:\n\n")
         f.write("トピックカバレッジ:\n")
@@ -261,7 +271,9 @@ def main(output_dir):
 
     # 実行時間も結果ファイルに追加
     with open(
-        os.path.join(output_dir, "esg_analysis_summary.txt"), "a", encoding="utf-8"
+        os.path.join(output_dir, f"esg_analysis_summary_{current_time}.txt"),
+        "a",
+        encoding="utf-8",
     ) as f:
         f.write(f"\n総実行時間: {total_time:.2f}秒\n")
 
