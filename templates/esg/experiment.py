@@ -17,6 +17,7 @@ import os
 import pickle
 from langchain_community.vectorstores import FAISS
 import json
+import time
 
 # Intel MKLを使用するための環境変数を設定
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
@@ -142,15 +143,23 @@ def iterative_extraction(rag_chain, initial_question, generate_text, max_iterati
     esg_topics = [topic for category in esg_categories.values() for topic in category]
 
     for i in range(max_iterations):
+        print(f"\nイテレーション {i+1}/{max_iterations} 開始")
+        start_time = time.time()
+
+        print("  RAGチェーンを実行中...")
         response = rag_chain(current_question)
         all_responses.append(response)
 
+        print("  新しい質問を生成中...")
         new_question, similarities = analyze_and_generate_new_question(
             response, initial_question, esg_topics, generate_text
         )
         current_question = new_question
 
         iteration_quality.append(np.mean(similarities))
+
+        end_time = time.time()
+        print(f"イテレーション {i+1} 完了 (所要時間: {end_time - start_time:.2f}秒)")
 
     final_response = "\n\n".join(all_responses)
     return final_response, iteration_quality
@@ -173,30 +182,44 @@ def evaluate_extraction(final_response, esg_topics):
     return similarities.tolist()
 
 
-def main():
-    data_dir = "/root_nas05/home/2022/naoki/AI-Scientist/data/esg"
-    output_dir = "/root_nas05/home/2022/naoki/AI-Scientist/templates/esg"
+def main(output_dir):
+    print("ESG分析を開始します...")
+    start_time = time.time()
 
+    data_dir = "/root_nas05/home/2022/naoki/AI-Scientist/data/esg"
+    os.makedirs(output_dir, exist_ok=True)
+
+    print("準備済みデータを読み込んでいます...")
     vectorstore, meta_data = load_prepared_data(data_dir)
 
+    print("質問応答モデルを設定しています...")
     qa_model = pipeline(
         "question-answering",
         model="tsmatz/roberta_qa_japanese",
     )
+
+    print("Swallowモデルを設定しています...")
     generate_text = setup_swallow_model()
 
+    print("RAGチェーンを設定しています...")
     rag_chain = setup_rag_chain(vectorstore, qa_model, generate_text)
 
     initial_question = "このレポートで議論されている主要なESG要因は何で、それらが投資判断にどのような影響を与える可能性がありますか？"
+    print("反復抽出を開始します...")
     final_response, iteration_quality = iterative_extraction(
         rag_chain, initial_question, generate_text
     )
 
+    print("結果をファイルに書き込んでいます...")
     with open(
         os.path.join(output_dir, "esg_analysis_result.txt"), "w", encoding="utf-8"
     ) as f:
+        f.write("ESG分析結果:\n\n")
+        f.write(f"初期質問: {initial_question}\n\n")
+        f.write("反復抽出の結果:\n")
         f.write(final_response)
 
+    print("抽出結果を評価しています...")
     topic_coverage = evaluate_extraction(
         final_response,
         [topic for category in esg_categories.values() for topic in category],
@@ -213,11 +236,39 @@ def main():
             float(x) for x in iteration_quality
         ],  # Convert float32 to float
     }
+
+    print("評価結果をJSONファイルに書き込んでいます...")
     with open(
         os.path.join(output_dir, "esg_analysis_results.json"), "w", encoding="utf-8"
     ) as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
 
+    # 評価結果をより明確なテキストファイルとしても出力
+    with open(
+        os.path.join(output_dir, "esg_analysis_summary.txt"), "w", encoding="utf-8"
+    ) as f:
+        f.write("ESG分析評価結果サマリー:\n\n")
+        f.write("トピックカバレッジ:\n")
+        for topic, coverage in results["topic_coverage"].items():
+            f.write(f"  {topic}: {coverage:.4f}\n")
+        f.write("\n反復品質:\n")
+        for i, quality in enumerate(results["iteration_quality"]):
+            f.write(f"  イテレーション {i+1}: {quality:.4f}\n")
+
+    end_time = time.time()
+    total_time = end_time - start_time
+    print(f"\nESG分析が完了しました。総実行時間: {total_time:.2f}秒")
+
+    # 実行時間も結果ファイルに追加
+    with open(
+        os.path.join(output_dir, "esg_analysis_summary.txt"), "a", encoding="utf-8"
+    ) as f:
+        f.write(f"\n総実行時間: {total_time:.2f}秒\n")
+
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Run ESG analysis")
+    parser.add_argument("--out_dir", type=str, default="run_0", help="Output directory")
+    args = parser.parse_args()
+
+    main(args.out_dir)
