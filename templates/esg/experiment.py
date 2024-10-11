@@ -9,7 +9,7 @@ from transformers import (
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain, RetrievalQA
 from langchain_community.llms import HuggingFacePipeline
-from langchain.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -17,6 +17,14 @@ import os
 import pickle
 from langchain_community.vectorstores import FAISS
 import json
+
+# Intel MKLを使用するための環境変数を設定
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
+
+# numpyがIntel MKLを使用していることを確認
+np.__config__.show()
 
 # ESGカテゴリとサブカテゴリの定義
 esg_categories = {
@@ -63,23 +71,22 @@ def load_prepared_data(data_dir):
 
 def setup_swallow_model():
     model_name = "tokyotech-llm/Swallow-MX-8x7b-NVE-v0.1"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False)
     model = AutoModelForCausalLM.from_pretrained(
         model_name, torch_dtype=torch.bfloat16, device_map="auto"
     )
 
     def generate_text(prompt, max_new_tokens=128):
-        input_ids = tokenizer.encode(
-            prompt, add_special_tokens=False, return_tensors="pt"
-        )
-        tokens = model.generate(
-            input_ids.to(device=model.device),
+        inputs = tokenizer(prompt, return_tensors="pt", add_special_tokens=False)
+        inputs = {k: v.to(model.device) for k, v in inputs.items()}
+        outputs = model.generate(
+            **inputs,
             max_new_tokens=max_new_tokens,
             temperature=0.99,
             top_p=0.95,
             do_sample=True,
         )
-        return tokenizer.decode(tokens[0], skip_special_tokens=True)
+        return tokenizer.decode(outputs[0], skip_special_tokens=True)
 
     return generate_text
 
@@ -92,7 +99,7 @@ def setup_rag_chain(vectorstore, qa_model, generate_text):
         context = " ".join([doc.page_content for doc in docs])
 
         qa_input = f"コンテキスト: {context}\n質問: {query}"
-        qa_result = qa_model(qa_input)
+        qa_result = qa_model(question=query, context=context)
 
         summary_prompt = f"以下の文章を要約してください：\n{qa_result['answer']}"
         summary = generate_text(summary_prompt)
