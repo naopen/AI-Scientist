@@ -206,10 +206,12 @@ def main():
         "topic_coverage": dict(
             zip(
                 [topic for category in esg_categories.values() for topic in category],
-                topic_coverage,
+                [float(x) for x in topic_coverage],  # Convert float32 to float
             )
         ),
-        "iteration_quality": iteration_quality,
+        "iteration_quality": [
+            float(x) for x in iteration_quality
+        ],  # Convert float32 to float
     }
     with open(
         os.path.join(output_dir, "esg_analysis_results.json"), "w", encoding="utf-8"
