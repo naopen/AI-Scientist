@@ -201,6 +201,7 @@ reference_esg_data = {
 
 
 def load_prepared_data(data_dir):
+    # 事前に作成した埋め込みベクトルとメタデータを読み込む
     embeddings = HuggingFaceEmbeddings(
         model_name="sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
     )
@@ -215,20 +216,23 @@ def load_prepared_data(data_dir):
 
 
 def setup_swallow_model():
-    model_name = "tokyotech-llm/Swallow-MX-8x7b-NVE-v0.1"
-    tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False)
+    model_name = "tokyotech-llm/Llama-3.1-Swallow-8B-Instruct-v0.1"  # モデル名を変更
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(
-        model_name, torch_dtype=torch.bfloat16, device_map="auto"
+        model_name,
+        torch_dtype=torch.bfloat16,  # 必要に応じてデータ型を調整
+        device_map="auto",
+        # load_in_8bit=True,  # 8bit量子化を使用
     )
 
     pipe = pipeline(
         "text-generation",
         model=model,
         tokenizer=tokenizer,
-        max_new_tokens=128,
-        temperature=0.99,
-        top_p=0.95,
-        do_sample=True,
+        max_new_tokens=128,  # 生成する最大トークン数
+        temperature=0.99,  # 生成の多様性を制御するパラメータ
+        top_p=0.95,  # 生成確率の高いトークンを選択するためのパラメータ
+        do_sample=True,  # ランダムサンプリングを行う
     )
 
     llm = HuggingFacePipeline(pipeline=pipe)
@@ -237,14 +241,19 @@ def setup_swallow_model():
 
 
 def setup_improved_rag_chain(vectorstore, llm):
-    base_retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+    # RAG (Retrieval Augmented Generation) チェーンを設定
+    base_retriever = vectorstore.as_retriever(
+        search_kwargs={"k": 5}
+    )  # ベクトルストアから上位5件のドキュメントを取得
 
+    # コンテキストを圧縮するためのLLMチェーン
     llm_chain_extractor = LLMChainExtractor.from_llm(llm)
     compression_retriever = ContextualCompressionRetriever(
         base_compressor=llm_chain_extractor, base_retriever=base_retriever
     )
 
     def rag_chain(query):
+        # 質問に基づいて関連ドキュメントを取得し、LLMにプロンプトを送信
         relevant_documents = compression_retriever.get_relevant_documents(query)
         context = "\n".join([doc.page_content for doc in relevant_documents])
 
@@ -267,6 +276,7 @@ def setup_improved_rag_chain(vectorstore, llm):
     return rag_chain
 
 
+# ESGカテゴリに基づいて焦点を絞った質問を生成
 def generate_focused_question(context, esg_categories, llm):
     prompt = f"""
     以下の文脈に基づいて、ESGと投資関連性に焦点を当てた質問を生成してください。
@@ -286,6 +296,7 @@ def generate_focused_question(context, esg_categories, llm):
     return llm(prompt)
 
 
+# テキストからESGカテゴリごとに構造化情報を抽出
 def extract_structured_info(text, esg_categories, llm):
     structured_info = {category: {} for category in esg_categories}
 
@@ -306,6 +317,7 @@ def extract_structured_info(text, esg_categories, llm):
     return structured_info
 
 
+# 回答とESGトピックの類似度を計算し、新しい質問を生成
 def analyze_and_generate_new_question(
     response, context, initial_question, esg_topics, llm
 ):
@@ -325,6 +337,7 @@ def analyze_and_generate_new_question(
     return new_question, similarities
 
 
+# 反復的に情報を抽出し、最終的な回答を生成
 def iterative_extraction(rag_chain, initial_question, llm, max_iterations=3):
     current_question = initial_question
     all_responses = []
@@ -357,6 +370,7 @@ def iterative_extraction(rag_chain, initial_question, llm, max_iterations=3):
     return final_response, iteration_quality, all_contexts
 
 
+# 2つのテキスト間の類似度を計算
 def calculate_similarity(text1, text2):
     model = SentenceTransformer(
         "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
@@ -366,6 +380,7 @@ def calculate_similarity(text1, text2):
     return cosine_similarity([embedding1], [embedding2])[0][0]
 
 
+# 抽出された情報の事実精度を計算
 def calculate_factual_accuracy(extracted_info, reference_facts):
     extracted_keywords = set(extracted_info.lower().split())
     matched_facts = sum(
@@ -376,6 +391,7 @@ def calculate_factual_accuracy(extracted_info, reference_facts):
     return matched_facts / len(reference_facts) if reference_facts else 0
 
 
+# 抽出された情報の投資関連性を評価
 def assess_investment_relevance(extracted_info, reference_impact):
     investment_keywords = set(reference_impact.lower().split())
     extracted_keywords = set(extracted_info.lower().split())
@@ -385,6 +401,7 @@ def assess_investment_relevance(extracted_info, reference_impact):
     return relevance_score
 
 
+# 抽出された情報の品質を評価
 def evaluate_extraction_quality(structured_info, reference_data):
     scores = {"relevance": 0, "completeness": 0, "accuracy": 0, "investment_impact": 0}
 

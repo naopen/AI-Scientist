@@ -1,0 +1,35 @@
+name: ai_esg_prepare
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.4
+  - pip
+  - pip:
+    - transformers
+    - langchain
+    - langchain-community
+    - langchain-core
+    - langchain-huggingface  # 新しく追加
+    - faiss-gpu
+    - tqdm
+    - ja-sentence-segmenter
+    - sentence-transformers
+    - typing-extensions
+    - dataclasses
+    - pathlib
+    - pickle5
+    - pypdf
+    - numpy
+    - scikit-learn
+
+# Setup Notes:
+# After installing the environment, enable FAISS AVX2 support:
+# cd $CONDA_PREFIX/lib/python3.10/site-packages/faiss
+# ln -s swigfaiss.py swigfaiss_avx2.py
