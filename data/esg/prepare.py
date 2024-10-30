@@ -25,29 +25,26 @@ class SplitMode(Enum):
 
 @dataclass
 class ProcessingConfig:
-    # 分割モード設定
-    split_mode: SplitMode = SplitMode.CHUNK
-    # チャンク分割用の設定
-    chunk_size: int = 500
-    chunk_overlap: int = 50
-    # 文単位分割用の設定
-    max_sentences: int = 3
-    sentence_overlap: int = 1
-    # 例示用の設定
-    num_examples: int = 5  # 表示する例の数
-    start_index: int = 0  # 表示を開始する位置（0から開始）
-    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    split_mode: SplitMode
+    chunk_size: int
+    chunk_overlap: int
+    max_sentences: int
+    sentence_overlap: int
+    num_examples: int
+    start_index: int
+    device: str
 
 
 class CustomEmbeddings(HuggingFaceEmbeddings):
-    def __init__(self):
+    def __init__(self, device: str):
         super().__init__(
             model_name="intfloat/multilingual-e5-large",
-            model_kwargs={"device": ProcessingConfig.device},
+            model_kwargs={"device": device},
             encode_kwargs={"normalize_embeddings": True},
         )
 
     def _add_prompt(self, texts: List[str], prompt_type: str) -> List[str]:
+        """プロンプトを追加してテキストを最適化"""
         if prompt_type == "query":
             return [f"query: {text}" for text in texts]
         elif prompt_type == "document":
@@ -55,19 +52,38 @@ class CustomEmbeddings(HuggingFaceEmbeddings):
         return texts
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        """文書用の埋め込みを生成"""
         texts = self._add_prompt(texts, "document")
         return super().embed_documents(texts)
 
     def embed_query(self, text: str) -> List[float]:
+        """クエリ用の埋め込みを生成"""
         text = self._add_prompt([text], "query")[0]
         return super().embed_query(text)
 
 
 class ESGDocumentProcessor:
-    def __init__(self, config: ProcessingConfig):
-        self.config = config
-        self.embeddings = CustomEmbeddings()
+    def __init__(self, split_mode: SplitMode):
+        # 基本設定
+        self.config = ProcessingConfig(
+            split_mode=split_mode,
+            # チャンク分割用の設定
+            chunk_size=500,
+            chunk_overlap=50,
+            # 文単位分割用の設定
+            max_sentences=3,
+            sentence_overlap=1,
+            # サンプル表示用の設定
+            num_examples=5,
+            start_index=0,
+            # デバイス設定
+            device="cuda" if torch.cuda.is_available() else "cpu",
+        )
 
+        # embeddings model の初期化
+        self.embeddings = CustomEmbeddings(device=self.config.device)
+
+        # 日本語文書分割器の設定
         split_punc2 = functools.partial(split_punctuation, punctuations=r".。!?")
         concat_tail_no = functools.partial(
             concatenate_matching,
@@ -104,9 +120,11 @@ class ESGDocumentProcessor:
         )
 
     def split_into_sentences(self, text: str) -> List[str]:
+        """テキストを文単位で分割"""
         return list(self.segmenter(text))
 
     def create_sentence_windows(self, sentences: List[str]) -> List[str]:
+        """文のリストから指定された数の文をまとめて、オーバーラップありでウィンドウを作成"""
         if not sentences:
             return []
 
@@ -141,22 +159,25 @@ class ESGDocumentProcessor:
         for i, doc in enumerate(documents[start_idx:end_idx], start=start_idx + 1):
             print(f"\n例 {i}:")
             print(f"長さ: {len(doc.page_content)} 文字")
-            print("内容:")  # 別行で内容を表示
-            print(doc.page_content)  # 内容を別行で表示
+            print("内容:")
+            print(doc.page_content)
             print("-" * 80)
 
     def process_pdf(self, file_path: Path) -> List[Document]:
+        """PDFファイルを処理して文書リストを生成"""
         try:
             loader = PyPDFLoader(str(file_path))
             documents = loader.load()
 
             if self.config.split_mode == SplitMode.CHUNK:
+                # チャンク単位での分割
                 text_splitter = CharacterTextSplitter(
                     chunk_size=self.config.chunk_size,
                     chunk_overlap=self.config.chunk_overlap,
                 )
                 docs = text_splitter.split_documents(documents)
             else:
+                # 文単位での分割
                 docs = []
                 for doc in documents:
                     sentences = self.split_into_sentences(doc.page_content)
@@ -175,7 +196,9 @@ class ESGDocumentProcessor:
                         )
 
             # 分割例を表示
-            self.display_examples(docs, file_path.name)
+            if self.config.num_examples > 0:
+                self.display_examples(docs, file_path.name)
+
             return docs
 
         except Exception as e:
@@ -183,9 +206,11 @@ class ESGDocumentProcessor:
             return []
 
     def create_vector_store(self, documents: List[Document]) -> FAISS:
+        """文書リストからベクトルストアを生成"""
         return FAISS.from_documents(documents, self.embeddings)
 
     def process_directory(self, input_dir: Path, output_dir: Path):
+        """ディレクトリ内のPDFファイルを処理"""
         input_dir = Path(input_dir)
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -231,57 +256,15 @@ class ESGDocumentProcessor:
 
 
 def main():
-    """
-    実行モードの設定
-    TEST_MODE: True = テスト実行（サンプル表示あり）, False = 本番実行（サンプル表示なし）
-    """
-    TEST_MODE = True  # ここを False に切り替えることで本番実行モードになります
+    # 文単位分割を使用する場合
+    # processor = ESGDocumentProcessor(split_mode=SplitMode.SENTENCE)
 
-    # ============= テスト実行用の設定 =============
-    if TEST_MODE:
-        test_configs = [
-            # テスト用：チャンク分割（少量のサンプルを表示）
-            ProcessingConfig(
-                split_mode=SplitMode.CHUNK,
-                chunk_size=500,
-                chunk_overlap=50,
-                num_examples=5,
-                start_index=50,
-            ),
-            # テスト用：文単位分割（少量のサンプルを表示）
-            ProcessingConfig(
-                split_mode=SplitMode.SENTENCE,
-                max_sentences=3,
-                sentence_overlap=1,
-                num_examples=5,
-                start_index=50,
-            ),
-        ]
+    # チャンク分割を使用する場合
+    processor = ESGDocumentProcessor(split_mode=SplitMode.CHUNK)
 
-        for config in test_configs:
-            print(f"\n=== テスト実行: {config.split_mode.value} モード ===")
-            processor = ESGDocumentProcessor(config)
-            input_dir = Path("/root_nas05/home/2022/naoki/AI-Scientist/data/esg")
-            output_dir = Path(
-                "/root_nas05/home/2022/naoki/AI-Scientist/data/esg/processed_test"
-            )
-            processor.process_directory(input_dir, output_dir)
-
-    # ============= 本番実行用の設定 =============
-    else:
-        config = ProcessingConfig(
-            split_mode=SplitMode.CHUNK,  # チャンク分割を使用する場合
-            # split_mode=SplitMode.SENTENCE, # 文単位分割を使用する場合
-            max_sentences=3,
-            sentence_overlap=1,
-            num_examples=0,  # 本番環境では例を表示しない
-            start_index=0,
-        )
-
-        processor = ESGDocumentProcessor(config)
-        input_dir = Path("/root_nas05/home/2022/naoki/AI-Scientist/data/esg")
-        output_dir = Path("/root_nas05/home/2022/naoki/AI-Scientist/data/esg/processed")
-        processor.process_directory(input_dir, output_dir)
+    input_dir = Path("/root_nas05/home/2022/naoki/AI-Scientist/data/esg")
+    output_dir = Path("/root_nas05/home/2022/naoki/AI-Scientist/data/esg/processed")
+    processor.process_directory(input_dir, output_dir)
 
 
 if __name__ == "__main__":
