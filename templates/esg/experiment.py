@@ -1,5 +1,6 @@
 import argparse
 import torch
+from typing import List, Dict, Any, Tuple, Optional
 from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 from langchain.llms import HuggingFacePipeline
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -13,500 +14,543 @@ import os
 import pickle
 import json
 import time
+import networkx as nx
 from datetime import datetime
+from collections import defaultdict
+from tqdm import tqdm
+from enum import Enum
 
-# Intel MKLを使用するための環境変数を設定
+# Intel MKL設定
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
 
-# numpyがIntel MKLを使用していることを確認
-# np.__config__.show()
 
-# ESGカテゴリとサブカテゴリの定義
-esg_categories = {
-    "Environmental": [
-        "気候変動対策",
-        "再生可能エネルギー",
-        "廃棄物管理",
-        "水資源管理",
-        "エネルギー効率",
-        "生物多様性",
-    ],
-    "Social": [
-        "労働条件",
-        "人権",
-        "ダイバーシティ",
-        "従業員の健康と安全",
-        "サプライチェーン管理",
-        "地域社会への貢献",
-    ],
-    "Governance": [
-        "コーポレートガバナンス",
-        "リスク管理",
-        "コンプライアンス",
-        "取締役会の構成",
-        "株主の権利",
-        "経営の透明性",
-    ],
-}
-
-# 詳細な参照データの定義
-reference_esg_data = {
-    "Environmental": {
-        "気候変動対策": {
-            "content": "企業はCO2排出量の削減目標を設定し、再生可能エネルギーの導入を進めている。また、カーボンプライシングの導入も検討している。",
-            "facts": [
-                "CO2排出量削減目標",
-                "再生可能エネルギー導入",
-                "カーボンプライシング検討",
-            ],
-            "impact": "長期的な環境規制リスクの低減と運用コストの削減につながる可能性がある。また、炭素税導入時のリスク軽減にも寄与する。",
-        },
-        "再生可能エネルギー": {
-            "content": "太陽光発電や風力発電などの再生可能エネルギー施設への投資を増やし、エネルギー調達の多様化を図っている。",
-            "facts": ["太陽光発電投資", "風力発電投資", "エネルギー調達多様化"],
-            "impact": "長期的なエネルギーコストの安定化と、環境配慮型企業としてのブランド価値向上が期待できる。",
-        },
-        "廃棄物管理": {
-            "content": "製品のリサイクル率向上と廃棄物削減のための取り組みを強化している。また、サーキュラーエコノミーの概念を導入している。",
-            "facts": ["リサイクル率向上", "廃棄物削減", "サーキュラーエコノミー導入"],
-            "impact": "資源効率の向上によるコスト削減と、環境負荷低減による企業イメージの向上が見込まれる。",
-        },
-        "水資源管理": {
-            "content": "水使用効率の改善と水質汚濁防止のための設備投資を行っている。また、水ストレス地域での事業における水リスク評価を実施している。",
-            "facts": ["水使用効率改善", "水質汚濁防止投資", "水リスク評価"],
-            "impact": "水関連コストの削減と、水資源をめぐる地域社会との潜在的な紛争リスクの低減が期待できる。",
-        },
-        "エネルギー効率": {
-            "content": "省エネ技術の導入と、エネルギーマネジメントシステムの構築を進めている。また、建物や設備の省エネ改修も実施している。",
-            "facts": [
-                "省エネ技術導入",
-                "エネルギーマネジメントシステム構築",
-                "省エネ改修",
-            ],
-            "impact": "エネルギーコストの削減と、環境規制への適応力向上によるビジネスリスクの低減が見込まれる。",
-        },
-        "生物多様性": {
-            "content": "事業活動が生態系に与える影響を評価し、生物多様性の保全活動を実施している。また、サプライチェーン全体での生物多様性への配慮も促進している。",
-            "facts": [
-                "生態系影響評価",
-                "生物多様性保全活動",
-                "サプライチェーンでの配慮",
-            ],
-            "impact": "生態系サービスへの依存リスクの軽減と、生物多様性に配慮した企業としてのレピュテーション向上が期待できる。",
-        },
-    },
-    "Social": {
-        "労働条件": {
-            "content": "従業員の労働環境改善と適切な報酬制度の導入に取り組んでいる。また、ワークライフバランスの推進と柔軟な勤務形態の導入を行っている。",
-            "facts": [
-                "労働環境改善",
-                "適切な報酬制度",
-                "ワークライフバランス推進",
-                "柔軟な勤務形態",
-            ],
-            "impact": "従業員の生産性向上とリテンション率の改善により、長期的な企業価値向上が期待できる。また、優秀な人材の獲得にも寄与する。",
-        },
-        "人権": {
-            "content": "人権デューデリジェンスを実施し、サプライチェーン全体での人権尊重を推進している。また、人権に関する教育・研修プログラムを従業員に提供している。",
-            "facts": [
-                "人権デューデリジェンス",
-                "サプライチェーンでの人権尊重",
-                "人権教育プログラム",
-            ],
-            "impact": "人権侵害に関するリスクの低減と、社会的責任を果たす企業としての評価向上が見込まれる。",
-        },
-        "ダイバーシティ": {
-            "content": "性別、年齢、国籍、障害の有無などに関わらず、多様な人材の登用と活躍推進を行っている。また、インクルーシブな職場環境の構築に取り組んでいる。",
-            "facts": [
-                "多様な人材登用",
-                "インクルーシブな職場環境",
-                "ダイバーシティ推進施策",
-            ],
-            "impact": "イノベーション創出力の向上と、多様な市場ニーズへの対応力強化が期待できる。",
-        },
-        "従業員の健康と安全": {
-            "content": "労働安全衛生マネジメントシステムの導入と、メンタルヘルスケアを含む健康管理プログラムの実施を行っている。また、新型コロナウイルス対策も強化している。",
-            "facts": [
-                "労働安全衛生マネジメント",
-                "健康管理プログラム",
-                "メンタルヘルスケア",
-                "感染症対策",
-            ],
-            "impact": "労働災害リスクの低減と、従業員の健康増進による生産性向上が見込まれる。また、パンデミック等の健康危機への耐性強化にも寄与する。",
-        },
-        "サプライチェーン管理": {
-            "content": "サプライヤーの労働条件や環境対応をモニタリングし、持続可能な調達方針を策定している。また、サプライヤーの能力開発支援も行っている。",
-            "facts": [
-                "サプライヤーモニタリング",
-                "持続可能な調達方針",
-                "サプライヤー能力開発",
-            ],
-            "impact": "サプライチェーンリスクの低減と、安定的な調達体制の構築による事業継続性の向上が期待できる。",
-        },
-        "地域社会への貢献": {
-            "content": "事業活動を通じた地域経済への貢献と、社会貢献活動の実施を行っている。また、地域コミュニティとの対話を通じて、地域のニーズに応じた取り組みを推進している。",
-            "facts": ["地域経済貢献", "社会貢献活動", "地域コミュニティとの対話"],
-            "impact": "地域社会との良好な関係構築による事業環境の安定化と、企業ブランド価値の向上が見込まれる。",
-        },
-    },
-    "Governance": {
-        "コーポレートガバナンス": {
-            "content": "取締役会の多様性を高め、独立した監査委員会を設置している。また、経営の透明性向上のための情報開示の拡充を行っている。",
-            "facts": ["取締役会の多様性", "独立監査委員会", "情報開示の拡充"],
-            "impact": "経営の健全性と透明性の向上により、投資家の信頼度が向上する可能性がある。また、不正リスクの低減にも寄与する。",
-        },
-        "リスク管理": {
-            "content": "統合的リスク管理システムを構築し、定期的なリスク評価と対応策の策定を行っている。また、気候変動関連リスクの評価とTCFD提言に基づく情報開示も実施している。",
-            "facts": [
-                "統合的リスク管理",
-                "定期的リスク評価",
-                "気候関連リスク評価",
-                "TCFD対応",
-            ],
-            "impact": "事業継続性の向上と、投資家に対する適切なリスク情報の提供による信頼性向上が期待できる。",
-        },
-        "コンプライアンス": {
-            "content": "行動規範の策定と従業員への浸透、内部通報制度の整備を行っている。また、定期的なコンプライアンス研修の実施と、違反事例の分析・対策も行っている。",
-            "facts": [
-                "行動規範策定",
-                "内部通報制度",
-                "コンプライアンス研修",
-                "違反事例分析",
-            ],
-            "impact": "法令違反リスクの低減と、企業倫理の向上による企業価値の保護が見込まれる。",
-        },
-        "取締役会の構成": {
-            "content": "社外取締役の比率を高め、取締役会の実効性評価を定期的に実施している。また、取締役のスキルマトリックスの開示も行っている。",
-            "facts": [
-                "社外取締役比率向上",
-                "取締役会実効性評価",
-                "スキルマトリックス開示",
-            ],
-            "impact": "経営の客観性と透明性の向上により、投資家からの信頼獲得と適切な経営判断の促進が期待できる。",
-        },
-        "株主の権利": {
-            "content": "株主総会における議決権行使の利便性向上と、株主との建設的な対話の促進を図っている。また、少数株主の権利保護にも留意している。",
-            "facts": ["議決権行使利便性向上", "株主との対話促進", "少数株主権利保護"],
-            "impact": "株主からの信頼獲得と、長期的な企業価値向上に向けた株主との協力関係構築が見込まれる。",
-        },
-        "経営の透明性": {
-            "content": "統合報告書の発行や、ESG情報の積極的な開示を行っている。また、経営戦略や中長期的な価値創造プロセスの明確な説明にも注力している。",
-            "facts": ["統合報告書発行", "ESG情報開示", "価値創造プロセス説明"],
-            "impact": "投資家の理解促進と、企業価値の適切な評価につながる可能性がある。また、ステークホルダーとの信頼関係構築にも寄与する。",
-        },
-    },
-}
+class SearchMode(Enum):
+    FAISS = "faiss"
+    GRAPH = "graph"
+    HYBRID = "hybrid"
 
 
-def load_prepared_data(data_dir):
-    # 事前に作成した埋め込みベクトルとメタデータを読み込む
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
-    )
-    vectorstore = FAISS.load_local(
-        os.path.join(data_dir, "vectorstore"),
-        embeddings=embeddings,
-        allow_dangerous_deserialization=True,
-    )
-    with open(os.path.join(data_dir, "meta.pkl"), "rb") as f:
-        meta_data = pickle.load(f)
-    return vectorstore, meta_data
+class ExperimentConfig:
+    def __init__(
+        self,
+        search_mode: SearchMode,
+        split_mode: str,
+        graph_mode: str,
+        model_name: str = "stockmark/stockmark-100b-instruct-v0.1",
+        top_k: int = 5,
+        similarity_threshold: float = 0.7,
+    ):
+        self.search_mode = search_mode
+        self.split_mode = split_mode
+        self.graph_mode = graph_mode
+        self.model_name = model_name
+        self.top_k = top_k
+        self.similarity_threshold = similarity_threshold
 
 
-def setup_swallow_model():
-    model_name = "tokyotech-llm/Llama-3.1-Swallow-8B-Instruct-v0.1"  # モデル名を変更
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype=torch.bfloat16,  # 必要に応じてデータ型を調整
-        device_map="auto",
-        # load_in_8bit=True,  # 8bit量子化を使用
-    )
+class ESGAnalyzer:
+    def __init__(self, config: ExperimentConfig, experiment_dir: str):
+        self.config = config
+        self.experiment_dir = experiment_dir
+        self.setup_embeddings()
+        self.setup_llm()
+        self.load_data()
 
-    pipe = pipeline(
-        "text-generation",
-        model=model,
-        tokenizer=tokenizer,
-        max_new_tokens=128,  # 生成する最大トークン数
-        temperature=0.99,  # 生成の多様性を制御するパラメータ
-        top_p=0.95,  # 生成確率の高いトークンを選択するためのパラメータ
-        do_sample=True,  # ランダムサンプリングを行う
-    )
-
-    llm = HuggingFacePipeline(pipeline=pipe)
-
-    return llm
-
-
-def setup_improved_rag_chain(vectorstore, llm):
-    # RAG (Retrieval Augmented Generation) チェーンを設定
-    base_retriever = vectorstore.as_retriever(
-        search_kwargs={"k": 5}
-    )  # ベクトルストアから上位5件のドキュメントを取得
-
-    # コンテキストを圧縮するためのLLMチェーン
-    llm_chain_extractor = LLMChainExtractor.from_llm(llm)
-    compression_retriever = ContextualCompressionRetriever(
-        base_compressor=llm_chain_extractor, base_retriever=base_retriever
-    )
-
-    def rag_chain(query):
-        # 質問に基づいて関連ドキュメントを取得し、LLMにプロンプトを送信
-        relevant_documents = compression_retriever.get_relevant_documents(query)
-        context = "\n".join([doc.page_content for doc in relevant_documents])
-
-        prompt = f"""
-        以下のコンテキストに基づいて、質問に答えてください。
-        できるだけ詳細かつ具体的に回答し、ESGの観点から投資判断に役立つ情報を提供してください。
-
-        コンテキスト:
-        {context}
-
-        質問: {query}
-
-        回答:
-        """
-
-        response = llm(prompt)
-
-        return response, context
-
-    return rag_chain
-
-
-# ESGカテゴリに基づいて焦点を絞った質問を生成
-def generate_focused_question(context, esg_categories, llm):
-    prompt = f"""
-    以下の文脈に基づいて、ESGと投資関連性に焦点を当てた質問を生成してください。
-    文脈: {context}
-    
-    ESGカテゴリ:
-    {json.dumps(esg_categories, ensure_ascii=False, indent=2)}
-    
-    生成する質問は以下の条件を満たすようにしてください:
-    1. ESGの特定のカテゴリまたはサブカテゴリに関連していること
-    2. 投資判断に直接影響を与える可能性のある情報を求めていること
-    3. 具体的で明確であること
-    4. 文脈から得られた情報を深掘りするものであること
-    
-    質問:
-    """
-    return llm(prompt)
-
-
-# テキストからESGカテゴリごとに構造化情報を抽出
-def extract_structured_info(text, esg_categories, llm):
-    structured_info = {category: {} for category in esg_categories}
-
-    for category, subcategories in esg_categories.items():
-        for subcategory in subcategories:
-            prompt = f"""
-            以下の文章から、{category}カテゴリの{subcategory}に関する情報を抽出し、
-            簡潔にまとめてください。投資判断に関連する情報に特に注目してください。
-
-            文章:
-            {text}
-
-            抽出した情報（100字以内）:
-            """
-            extracted_info = llm(prompt)
-            structured_info[category][subcategory] = extracted_info
-
-    return structured_info
-
-
-# 回答とESGトピックの類似度を計算し、新しい質問を生成
-def analyze_and_generate_new_question(
-    response, context, initial_question, esg_topics, llm
-):
-    model = SentenceTransformer(
-        "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
-    )
-
-    response_embedding = model.encode(response)
-    topic_embeddings = model.encode(esg_topics)
-
-    similarities = cosine_similarity([response_embedding], topic_embeddings)[0]
-
-    low_similarity_topics = [esg_topics[i] for i in np.argsort(similarities)[:3]]
-
-    new_question = generate_focused_question(context, esg_categories, llm)
-
-    return new_question, similarities
-
-
-# 反復的に情報を抽出し、最終的な回答を生成
-def iterative_extraction(rag_chain, initial_question, llm, max_iterations=3):
-    current_question = initial_question
-    all_responses = []
-    all_contexts = []
-    iteration_quality = []
-
-    esg_topics = [topic for category in esg_categories.values() for topic in category]
-
-    for i in range(max_iterations):
-        print(f"\nイテレーション {i+1}/{max_iterations} 開始")
-        start_time = time.time()
-
-        print("  RAGチェーンを実行中...")
-        response, context = rag_chain(current_question)
-        all_responses.append(response)
-        all_contexts.append(context)
-
-        print("  新しい質問を生成中...")
-        new_question, similarities = analyze_and_generate_new_question(
-            response, context, initial_question, esg_topics, llm
+    def setup_embeddings(self):
+        """埋め込みモデルの設定"""
+        self.embeddings = HuggingFaceEmbeddings(
+            model_name="intfloat/multilingual-e5-large"
         )
-        current_question = new_question
+        self.sentence_transformer = SentenceTransformer(
+            "intfloat/multilingual-e5-large"
+        )
 
-        iteration_quality.append(np.mean(similarities))
+    def setup_llm(self):
+        """Stockmark-LLMの設定"""
+        tokenizer = AutoTokenizer.from_pretrained(self.config.model_name)
+        model = AutoModelForCausalLM.from_pretrained(
+            self.config.model_name,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+        )
 
-        end_time = time.time()
-        print(f"イテレーション {i+1} 完了 (所要時間: {end_time - start_time:.2f}秒)")
+        pipe = pipeline(
+            "text-generation",
+            model=model,
+            tokenizer=tokenizer,
+            max_new_tokens=512,
+            temperature=0.7,
+            top_p=0.9,
+            do_sample=True,
+        )
 
-    final_response = extract_structured_info(all_responses[-1], esg_categories, llm)
-    return final_response, iteration_quality, all_contexts
+        self.llm = HuggingFacePipeline(pipeline=pipe)
+        self.compressor = LLMChainExtractor.from_llm(self.llm)
 
+    def load_data(self):
+        """実験データの読み込み"""
+        # FAISSベクトルストアの読み込み
+        self.vectorstore = FAISS.load_local(
+            os.path.join(self.experiment_dir, "vectorstore"),
+            self.embeddings,
+            allow_dangerous_deserialization=True,
+        )
 
-# 2つのテキスト間の類似度を計算
-def calculate_similarity(text1, text2):
-    model = SentenceTransformer(
-        "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
-    )
-    embedding1 = model.encode(text1)
-    embedding2 = model.encode(text2)
-    return cosine_similarity([embedding1], [embedding2])[0][0]
+        # メタデータの読み込み
+        with open(os.path.join(self.experiment_dir, "metadata.pkl"), "rb") as f:
+            self.metadata = pickle.load(f)
 
+        # グラフデータの読み込み（存在する場合）
+        if self.config.graph_mode != "none":
+            if os.path.exists(os.path.join(self.experiment_dir, "graph.gpickle")):
+                self.graph = nx.read_gpickle(
+                    os.path.join(self.experiment_dir, "graph.gpickle")
+                )
+            elif os.path.exists(os.path.join(self.experiment_dir, "graph_data.pkl")):
+                with open(
+                    os.path.join(self.experiment_dir, "graph_data.pkl"), "rb"
+                ) as f:
+                    self.graph_data = pickle.load(f)
+            else:
+                self.graph = None
+                self.graph_data = None
 
-# 抽出された情報の事実精度を計算
-def calculate_factual_accuracy(extracted_info, reference_facts):
-    extracted_keywords = set(extracted_info.lower().split())
-    matched_facts = sum(
-        1
-        for fact in reference_facts
-        if any(keyword in fact.lower() for keyword in extracted_keywords)
-    )
-    return matched_facts / len(reference_facts) if reference_facts else 0
+    def search_faiss(self, query: str) -> List[Dict]:
+        """FAISSによる検索"""
+        retriever = self.vectorstore.as_retriever(
+            search_kwargs={"k": self.config.top_k}
+        )
+        compression_retriever = ContextualCompressionRetriever(
+            base_compressor=self.compressor, base_retriever=retriever
+        )
 
+        documents = compression_retriever.get_relevant_documents(query)
+        return [
+            {
+                "content": doc.page_content,
+                "metadata": doc.metadata,
+                "search_type": "faiss",
+            }
+            for doc in documents
+        ]
 
-# 抽出された情報の投資関連性を評価
-def assess_investment_relevance(extracted_info, reference_impact):
-    investment_keywords = set(reference_impact.lower().split())
-    extracted_keywords = set(extracted_info.lower().split())
-    relevance_score = len(investment_keywords.intersection(extracted_keywords)) / len(
-        investment_keywords
-    )
-    return relevance_score
+    def search_graph(self, query: str) -> List[Dict]:
+        """グラフベースの検索"""
+        if not (self.graph or self.graph_data):
+            return []
 
+        # クエリの埋め込み
+        query_embedding = self.embeddings.embed_query(query)
 
-# 抽出された情報の品質を評価
-def evaluate_extraction_quality(structured_info, reference_data):
-    scores = {"relevance": 0, "completeness": 0, "accuracy": 0, "investment_impact": 0}
+        results = []
+        if hasattr(self, "graph"):
+            # NetworkXグラフからの検索
+            for node in self.graph.nodes(data=True):
+                if node[1].get("type") == "Evidence":
+                    content = node[1].get("content", "")
+                    doc_embedding = self.embeddings.embed_query(content)
+                    similarity = cosine_similarity([query_embedding], [doc_embedding])[
+                        0
+                    ][0]
 
-    for category, subcategories in structured_info.items():
-        for subcategory, info in subcategories.items():
-            reference = reference_data[category][subcategory]
+                    if similarity > self.config.similarity_threshold:
+                        results.append(
+                            {
+                                "content": content,
+                                "metadata": node[1],
+                                "similarity": similarity,
+                                "search_type": "graph",
+                                "node_id": node[0],
+                            }
+                        )
 
-            scores["relevance"] += calculate_similarity(info, reference["content"])
-            scores["completeness"] += len(info) / len(reference["content"])
-            scores["accuracy"] += calculate_factual_accuracy(info, reference["facts"])
-            scores["investment_impact"] += assess_investment_relevance(
-                info, reference["impact"]
+        elif hasattr(self, "graph_data"):
+            # 保存されたグラフデータからの検索
+            for node in self.graph_data["nodes"]:
+                if node.type.value == "Evidence":
+                    content = node.properties.get("content", "")
+                    doc_embedding = self.embeddings.embed_query(content)
+                    similarity = cosine_similarity([query_embedding], [doc_embedding])[
+                        0
+                    ][0]
+
+                    if similarity > self.config.similarity_threshold:
+                        results.append(
+                            {
+                                "content": content,
+                                "metadata": node.properties,
+                                "similarity": similarity,
+                                "search_type": "graph",
+                                "node_id": node.id,
+                            }
+                        )
+
+        # 類似度でソートして上位k件を返す
+        results.sort(key=lambda x: x["similarity"], reverse=True)
+        return results[: self.config.top_k]
+
+    def analyze_evidence(self, evidence: Dict) -> Dict:
+        """根拠の分析"""
+        prompt = f"""
+以下の文章から、ESG評価のための根拠としての質を分析してください。
+
+文章: {evidence['content']}
+
+分析の観点:
+1. 具体性: 数値や具体的な事実が含まれているか
+2. 検証可能性: 第三者が検証可能な情報か
+3. 時期の明確性: いつの情報か明確か
+4. 投資判断との関連性: 投資判断に影響を与える情報か
+
+回答は以下の形式で書いてください:
+- 具体性の評価（0-10点）:
+- 検証可能性の評価（0-10点）:
+- 時期の明確性の評価（0-10点）:
+- 投資判断との関連性の評価（0-10点）:
+- 総合評価（上記の平均点）:
+- コメント:
+"""
+        response = self.llm(prompt)
+
+        try:
+            scores = {}
+            for line in response.split("\n"):
+                if "評価" in line and ":" in line:
+                    key, value = line.split(":")
+                    try:
+                        scores[key.strip()] = float(value.strip().split()[0])
+                    except:
+                        continue
+
+            comment = ""
+            if "コメント:" in response:
+                comment = response.split("コメント:")[1].strip()
+
+            return {"scores": scores, "comment": comment, "raw_response": response}
+        except Exception as e:
+            return {"error": str(e), "raw_response": response}
+
+    def find_related_evidences(self, evidence: Dict) -> List[Dict]:
+        """関連する根拠の検索"""
+        if self.config.graph_mode != "none" and (self.graph or self.graph_data):
+            # グラフベースの関連性検索
+            related = []
+            if hasattr(self, "graph"):
+                node_id = evidence.get("node_id")
+                if node_id:
+                    neighbors = self.graph.neighbors(node_id)
+                    for neighbor in neighbors:
+                        if self.graph.nodes[neighbor].get("type") == "Evidence":
+                            related.append(
+                                {
+                                    "content": self.graph.nodes[neighbor].get(
+                                        "content", ""
+                                    ),
+                                    "metadata": self.graph.nodes[neighbor],
+                                    "relation_type": self.graph.edges[
+                                        node_id, neighbor
+                                    ].get("type", "unknown"),
+                                }
+                            )
+
+            elif hasattr(self, "graph_data"):
+                for relation in self.graph_data["relations"]:
+                    if relation.source_id == evidence.get("node_id"):
+                        target_node = next(
+                            (
+                                n
+                                for n in self.graph_data["nodes"]
+                                if n.id == relation.target_id
+                            ),
+                            None,
+                        )
+                        if target_node and target_node.type.value == "Evidence":
+                            related.append(
+                                {
+                                    "content": target_node.properties.get(
+                                        "content", ""
+                                    ),
+                                    "metadata": target_node.properties,
+                                    "relation_type": relation.type.value,
+                                }
+                            )
+
+            return related
+        else:
+            # FAISSベースの類似度検索
+            query_embedding = self.embeddings.embed_query(evidence["content"])
+            similar_docs = self.vectorstore.similarity_search_by_vector(
+                query_embedding, k=self.config.top_k
+            )
+            return [
+                {
+                    "content": doc.page_content,
+                    "metadata": doc.metadata,
+                    "search_type": "similarity",
+                }
+                for doc in similar_docs
+                if doc.page_content != evidence["content"]
+            ]
+
+    def search(self, query: str) -> List[Dict]:
+        """検索の実行"""
+        if self.config.search_mode == SearchMode.FAISS:
+            return self.search_faiss(query)
+        elif self.config.search_mode == SearchMode.GRAPH:
+            return self.search_graph(query)
+        else:  # HYBRID mode
+            faiss_results = self.search_faiss(query)
+            graph_results = self.search_graph(query)
+
+            # 重複を除去して結果をマージ
+            seen_contents = set()
+            merged_results = []
+
+            for result in faiss_results + graph_results:
+                content = result["content"]
+                if content not in seen_contents:
+                    seen_contents.add(content)
+                    merged_results.append(result)
+
+            return merged_results[: self.config.top_k]
+
+    def analyze_and_expand(self, query: str) -> Dict:
+        """検索、分析、展開の実行"""
+        # 初期検索
+        search_results = self.search(query)
+
+        # 各結果の分析
+        analyzed_results = []
+        for result in search_results:
+            analysis = self.analyze_evidence(result)
+            related_evidences = self.find_related_evidences(result)
+
+            analyzed_results.append(
+                {
+                    "evidence": result,
+                    "analysis": analysis,
+                    "related_evidences": related_evidences,
+                }
             )
 
-    # Normalize scores
-    total_items = sum(len(subcategories) for subcategories in esg_categories.values())
-    for key in scores:
-        scores[key] /= total_items
+        # 結果の評価とスコアリング
+        scored_results = []
+        for result in analyzed_results:
+            if "scores" in result["analysis"]:
+                total_score = sum(result["analysis"]["scores"].values()) / len(
+                    result["analysis"]["scores"]
+                )
+                scored_results.append({**result, "total_score": total_score})
 
-    return scores
+        # スコアで並び替え
+        scored_results.sort(key=lambda x: x["total_score"], reverse=True)
+
+        return {
+            "query": query,
+            "results": scored_results,
+            "metadata": {
+                "total_results": len(scored_results),
+                "search_mode": self.config.search_mode.value,
+                "split_mode": self.config.split_mode,
+                "graph_mode": self.config.graph_mode,
+            },
+        }
 
 
-def main(output_dir):
-    print("ESG分析を開始します...")
+def run_experiment(config: ExperimentConfig, data_dir: str, output_dir: str):
+    """実験の実行"""
+    print(f"\n=== 実験開始: {config.search_mode.value} mode ===")
     start_time = time.time()
 
-    current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    data_dir = "/root_nas05/home/2022/naoki/AI-Scientist/data/esg"
-    os.makedirs(output_dir, exist_ok=True)
-
-    print("準備済みデータを読み込んでいます...")
-    vectorstore, meta_data = load_prepared_data(data_dir)
-
-    print("Swallowモデルを設定しています...")
-    llm = setup_swallow_model()
-
-    print("改善されたRAGチェーンを設定しています...")
-    rag_chain = setup_improved_rag_chain(vectorstore, llm)
-
-    initial_question = "このレポートで議論されている主要なESG要因は何で、それらが投資判断にどのような影響を与える可能性がありますか？"
-    print("反復抽出を開始します...")
-    final_response, iteration_quality, all_contexts = iterative_extraction(
-        rag_chain, initial_question, llm
+    # 実験用ディレクトリの設定
+    experiment_dir = os.path.join(
+        data_dir, f"experiment_{config.split_mode}_{config.graph_mode}"
     )
 
-    print("結果をファイルに書き込んでいます...")
-    with open(
-        os.path.join(output_dir, f"esg_analysis_result_{current_time}.json"),
-        "w",
-        encoding="utf-8",
-    ) as f:
-        json.dump(final_response, f, ensure_ascii=False, indent=2)
+    if not os.path.exists(experiment_dir):
+        raise ValueError(f"Experiment directory not found: {experiment_dir}")
 
-    print("抽出結果を評価しています...")
-    evaluation_results = evaluate_extraction_quality(final_response, reference_esg_data)
+    # アナライザーの初期化
+    analyzer = ESGAnalyzer(config, experiment_dir)
 
-    results = {
-        "structured_info": final_response,
-        "evaluation_results": evaluation_results,
-        "iteration_quality": [float(x) for x in iteration_quality],
+    # サンプルクエリの実行
+    sample_queries = [
+        "このレポートで議論されている主要なESG要因は何で、それらが投資判断にどのような影響を与える可能性がありますか？",
+        "気候変動対策について、具体的な数値目標と実績を示してください。",
+        "従業員の健康と安全に関する取り組みの実績を教えてください。",
+        "コーポレートガバナンスの改善に向けた具体的な施策は何ですか？",
+    ]
+
+    results = []
+    for query in tqdm(sample_queries, desc="Analyzing queries"):
+        result = analyzer.analyze_and_expand(query)
+        results.append(result)
+
+    # 結果の保存
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_filename = os.path.join(
+        output_dir, f"experiment_results_{config.search_mode.value}_{timestamp}.json"
+    )
+
+    # 実験メタデータの追加
+    experiment_results = {
+        "config": {
+            "search_mode": config.search_mode.value,
+            "split_mode": config.split_mode,
+            "graph_mode": config.graph_mode,
+            "model_name": config.model_name,
+            "top_k": config.top_k,
+            "similarity_threshold": config.similarity_threshold,
+        },
+        "execution_time": time.time() - start_time,
+        "timestamp": timestamp,
+        "queries": results,
     }
 
-    print("評価結果をJSONファイルに書き込んでいます...")
-    with open(
-        os.path.join(output_dir, f"esg_analysis_results_{current_time}.json"),
-        "w",
-        encoding="utf-8",
-    ) as f:
-        json.dump(results, f, ensure_ascii=False, indent=2)
+    os.makedirs(output_dir, exist_ok=True)
+    with open(output_filename, "w", encoding="utf-8") as f:
+        json.dump(experiment_results, f, ensure_ascii=False, indent=2)
 
-    print("コンテキスト情報を保存しています...")
-    with open(
-        os.path.join(output_dir, f"esg_analysis_contexts_{current_time}.txt"),
-        "w",
-        encoding="utf-8",
-    ) as f:
-        for i, context in enumerate(all_contexts):
-            f.write(f"イテレーション {i+1} のコンテキスト:\n")
-            f.write(context)
-            f.write("\n\n" + "=" * 50 + "\n\n")
+    print(f"実験結果を保存しました: {output_filename}")
+    print(f"実行時間: {experiment_results['execution_time']:.2f}秒")
 
-    end_time = time.time()
-    total_time = end_time - start_time
-    print(f"\nESG分析が完了しました。総実行時間: {total_time:.2f}秒")
+    return experiment_results
 
-    # 実行時間も結果ファイルに追加
-    with open(
-        os.path.join(output_dir, f"esg_analysis_summary_{current_time}.txt"),
-        "w",
-        encoding="utf-8",
-    ) as f:
-        f.write(f"ESG分析評価結果サマリー:\n\n")
-        f.write(f"評価結果:\n")
-        for metric, score in evaluation_results.items():
-            f.write(f"  {metric}: {score:.4f}\n")
-        f.write(f"\n反復品質:\n")
-        for i, quality in enumerate(iteration_quality):
-            f.write(f"  イテレーション {i+1}: {quality:.4f}\n")
-        f.write(f"\n総実行時間: {total_time:.2f}秒\n")
+
+def main(args):
+    print("ESG分析実験を開始します...")
+
+    # 実験設定の組み合わせ
+    experiment_configs = [
+        # FAISSのみ（チャンク分割）
+        ExperimentConfig(
+            search_mode=SearchMode.FAISS, split_mode="chunk", graph_mode="none"
+        ),
+        # FAISSのみ（文単位分割）
+        ExperimentConfig(
+            search_mode=SearchMode.FAISS, split_mode="sentence", graph_mode="none"
+        ),
+        # グラフのみ（チャンク分割）
+        ExperimentConfig(
+            search_mode=SearchMode.GRAPH, split_mode="chunk", graph_mode="networkx"
+        ),
+        # グラフのみ（文単位分割）
+        ExperimentConfig(
+            search_mode=SearchMode.GRAPH, split_mode="sentence", graph_mode="networkx"
+        ),
+        # ハイブリッド（チャンク分割）
+        ExperimentConfig(
+            search_mode=SearchMode.HYBRID, split_mode="chunk", graph_mode="networkx"
+        ),
+        # ハイブリッド（文単位分割）
+        ExperimentConfig(
+            search_mode=SearchMode.HYBRID, split_mode="sentence", graph_mode="networkx"
+        ),
+    ]
+
+    # 各設定で実験を実行
+    all_results = {}
+    for config in experiment_configs:
+        try:
+            results = run_experiment(config, args.data_dir, args.output_dir)
+            all_results[f"{config.search_mode.value}_{config.split_mode}"] = results
+        except Exception as e:
+            print(
+                f"実験エラー ({config.search_mode.value}_{config.split_mode}): {str(e)}"
+            )
+
+    # 実験結果の比較分析
+    comparison = analyze_experiment_results(all_results)
+
+    # 比較結果の保存
+    comparison_file = os.path.join(
+        args.output_dir,
+        f"experiment_comparison_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+    )
+
+    with open(comparison_file, "w", encoding="utf-8") as f:
+        json.dump(comparison, f, ensure_ascii=False, indent=2)
+
+    print(f"\n実験比較結果を保存しました: {comparison_file}")
+
+
+def analyze_experiment_results(all_results: Dict[str, Any]) -> Dict[str, Any]:
+    """実験結果の比較分析"""
+    comparison = {
+        "execution_times": {},
+        "average_scores": {},
+        "query_performance": defaultdict(dict),
+        "summary": {},
+    }
+
+    for exp_name, results in all_results.items():
+        # 実行時間の比較
+        comparison["execution_times"][exp_name] = results["execution_time"]
+
+        # スコアの平均値計算
+        scores = []
+        for query_result in results["queries"]:
+            for result in query_result["results"]:
+                if "total_score" in result:
+                    scores.append(result["total_score"])
+
+        if scores:
+            comparison["average_scores"][exp_name] = np.mean(scores)
+
+        # クエリごとのパフォーマンス分析
+        for query_idx, query_result in enumerate(results["queries"]):
+            comparison["query_performance"][f"query_{query_idx}"][exp_name] = {
+                "num_results": len(query_result["results"]),
+                "avg_score": (
+                    np.mean(
+                        [
+                            r["total_score"]
+                            for r in query_result["results"]
+                            if "total_score" in r
+                        ]
+                    )
+                    if query_result["results"]
+                    else 0
+                ),
+            }
+
+    # 総合評価
+    best_time = min(comparison["execution_times"].items(), key=lambda x: x[1])
+    best_score = max(comparison["average_scores"].items(), key=lambda x: x[1])
+
+    comparison["summary"] = {
+        "fastest_method": {"name": best_time[0], "time": best_time[1]},
+        "best_scoring_method": {"name": best_score[0], "score": best_score[1]},
+        "recommendations": {
+            "speed_focused": best_time[0],
+            "quality_focused": best_score[0],
+            "balanced": (
+                best_score[0]
+                if best_score[1] / max(comparison["average_scores"].values()) > 0.9
+                else best_time[0]
+            ),
+        },
+    }
+
+    return comparison
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run ESG analysis")
-    parser.add_argument("--out_dir", type=str, default="run_0", help="Output directory")
-    args = parser.parse_args()
+    parser = argparse.ArgumentParser(description="Run ESG analysis experiments")
+    parser.add_argument(
+        "--data_dir",
+        type=str,
+        default="/root_nas05/home/2022/naoki/AI-Scientist/data/esg/processed",
+        help="Processed data directory",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="experiment_results",
+        help="Output directory for experiment results",
+    )
 
-    main(args.out_dir)
+    args = parser.parse_args()
+    main(args)

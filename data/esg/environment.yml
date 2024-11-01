@@ -1,7 +1,8 @@
-name: ai_esg_prepare
+name: ai_esg
 channels:
   - pytorch
   - nvidia
+  - huggingface
   - conda-forge
   - defaults
 dependencies:
@@ -10,26 +11,42 @@ dependencies:
   - torchvision
   - torchaudio
   - pytorch-cuda=12.4
+  - networkx
+  - spacy
   - pip
   - pip:
     - transformers
     - langchain
     - langchain-community
     - langchain-core
-    - langchain-huggingface  # 新しく追加
+    - langchain-huggingface
     - faiss-gpu
     - tqdm
     - ja-sentence-segmenter
     - sentence-transformers
     - typing-extensions
-    - dataclasses
     - pathlib
-    - pickle5
     - pypdf
     - numpy
     - scikit-learn
+    - neo4j
 
 # Setup Notes:
-# After installing the environment, enable FAISS AVX2 support:
-# cd $CONDA_PREFIX/lib/python3.10/site-packages/faiss
-# ln -s swigfaiss.py swigfaiss_avx2.py
+# 1. Create/Update environment using:
+#    conda env update -f environment.yml
+#    # If the environment doesn't exist, it will be created
+#    # If it exists, it will be updated with any new dependencies
+#
+# 2. Activate the environment:
+#    conda activate ai_esg_prepare
+#
+# 3. Download Japanese language model:
+#    python -m spacy download ja_core_news_lg
+#
+# 4. Enable FAISS AVX2 support:
+#    cd $CONDA_PREFIX/lib/python3.10/site-packages/faiss
+#    ln -s swigfaiss.py swigfaiss_avx2.py
+#
+# 5. Verify GPU support:
+#    python -c "import torch; print(torch.cuda.is_available())"
+#    python -c "import torch; print(torch.version.cuda)"
