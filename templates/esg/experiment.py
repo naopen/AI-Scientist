@@ -1,9 +1,10 @@
 import argparse
 import torch
 from typing import List, Dict, Any, Tuple, Optional
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
-from langchain.llms import HuggingFacePipeline
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from transformers import AutoTokenizer, pipeline
+from peft import AutoPeftModelForCausalLM
+from langchain_community.llms import HuggingFacePipeline
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain.retrievers import ContextualCompressionRetriever
 from langchain.retrievers.document_compressors import LLMChainExtractor
@@ -69,25 +70,81 @@ class ESGAnalyzer:
 
     def setup_llm(self):
         """Stockmark-LLMの設定"""
-        tokenizer = AutoTokenizer.from_pretrained(self.config.model_name)
-        model = AutoModelForCausalLM.from_pretrained(
+        # トークナイザーの初期化
+        tokenizer = AutoTokenizer.from_pretrained(
+            self.config.model_name, legacy=False, trust_remote_code=True
+        )
+
+        # モデルの初期化
+        model = AutoPeftModelForCausalLM.from_pretrained(
             self.config.model_name,
             torch_dtype=torch.bfloat16,
             device_map="auto",
+            trust_remote_code=True,
         )
+
+        # プロンプトテンプレート関数の定義
+        def format_prompt(text: str) -> str:
+            return f"""### 指示:
+    {text}
+
+    ### 応答:
+    """
+
+        # 生成関数の定義
+        def generate_text(prompt: str) -> str:
+            formatted_prompt = format_prompt(prompt)
+            input_ids = tokenizer(
+                formatted_prompt, return_tensors="pt", truncation=True, max_length=2048
+            ).input_ids.to(model.device)
+
+            with torch.inference_mode():
+                output_ids = model.generate(
+                    input_ids,
+                    max_new_tokens=512,
+                    do_sample=True,
+                    temperature=0.7,
+                    top_p=0.9,
+                    repetition_penalty=1.08,
+                    pad_token_id=tokenizer.pad_token_id,
+                    eos_token_id=tokenizer.eos_token_id,
+                )
+
+            response = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+            # プロンプトテンプレートの部分を除去
+            response = response.split("### 応答:")[1].strip()
+            return response
+
+        # パイプラインの設定
+        base_model = model.get_base_model()  # PeftModelをベースモデルに変換
 
         pipe = pipeline(
             "text-generation",
-            model=model,
+            model=base_model,
             tokenizer=tokenizer,
             max_new_tokens=512,
+            do_sample=True,
             temperature=0.7,
             top_p=0.9,
-            do_sample=True,
+            repetition_penalty=1.08,
+            return_full_text=False,
+            device_map="auto",
+            torch_dtype=torch.bfloat16,
+            trust_remote_code=True,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
         )
 
-        self.llm = HuggingFacePipeline(pipeline=pipe)
+        # LangChainのLLMとして設定
+        self.llm = HuggingFacePipeline(
+            pipeline=pipe,
+        )
+
+        # コンプレッサーの設定
         self.compressor = LLMChainExtractor.from_llm(self.llm)
+
+        # メモリ効率化のためにキャッシュをクリア
+        torch.cuda.empty_cache()
 
     def load_data(self):
         """実験データの読み込み"""
@@ -190,6 +247,28 @@ class ESGAnalyzer:
         # 類似度でソートして上位k件を返す
         results.sort(key=lambda x: x["similarity"], reverse=True)
         return results[: self.config.top_k]
+
+    def search(self, query: str) -> List[Dict]:
+        """検索の実行"""
+        if self.config.search_mode == SearchMode.FAISS:
+            return self.search_faiss(query)
+        elif self.config.search_mode == SearchMode.GRAPH:
+            return self.search_graph(query)
+        else:  # HYBRID mode
+            faiss_results = self.search_faiss(query)
+            graph_results = self.search_graph(query)
+
+            # 重複を除去して結果をマージ
+            seen_contents = set()
+            merged_results = []
+
+            for result in faiss_results + graph_results:
+                content = result["content"]
+                if content not in seen_contents:
+                    seen_contents.add(content)
+                    merged_results.append(result)
+
+            return merged_results[: self.config.top_k]
 
     def analyze_evidence(self, evidence: Dict) -> Dict:
         """根拠の分析"""
@@ -294,28 +373,6 @@ class ESGAnalyzer:
                 if doc.page_content != evidence["content"]
             ]
 
-    def search(self, query: str) -> List[Dict]:
-        """検索の実行"""
-        if self.config.search_mode == SearchMode.FAISS:
-            return self.search_faiss(query)
-        elif self.config.search_mode == SearchMode.GRAPH:
-            return self.search_graph(query)
-        else:  # HYBRID mode
-            faiss_results = self.search_faiss(query)
-            graph_results = self.search_graph(query)
-
-            # 重複を除去して結果をマージ
-            seen_contents = set()
-            merged_results = []
-
-            for result in faiss_results + graph_results:
-                content = result["content"]
-                if content not in seen_contents:
-                    seen_contents.add(content)
-                    merged_results.append(result)
-
-            return merged_results[: self.config.top_k]
-
     def analyze_and_expand(self, query: str) -> Dict:
         """検索、分析、展開の実行"""
         # 初期検索
@@ -419,63 +476,6 @@ def run_experiment(config: ExperimentConfig, data_dir: str, output_dir: str):
     return experiment_results
 
 
-def main(args):
-    print("ESG分析実験を開始します...")
-
-    # 実験設定の組み合わせ
-    experiment_configs = [
-        # FAISSのみ（チャンク分割）
-        ExperimentConfig(
-            search_mode=SearchMode.FAISS, split_mode="chunk", graph_mode="none"
-        ),
-        # FAISSのみ（文単位分割）
-        ExperimentConfig(
-            search_mode=SearchMode.FAISS, split_mode="sentence", graph_mode="none"
-        ),
-        # グラフのみ（チャンク分割）
-        ExperimentConfig(
-            search_mode=SearchMode.GRAPH, split_mode="chunk", graph_mode="networkx"
-        ),
-        # グラフのみ（文単位分割）
-        ExperimentConfig(
-            search_mode=SearchMode.GRAPH, split_mode="sentence", graph_mode="networkx"
-        ),
-        # ハイブリッド（チャンク分割）
-        ExperimentConfig(
-            search_mode=SearchMode.HYBRID, split_mode="chunk", graph_mode="networkx"
-        ),
-        # ハイブリッド（文単位分割）
-        ExperimentConfig(
-            search_mode=SearchMode.HYBRID, split_mode="sentence", graph_mode="networkx"
-        ),
-    ]
-
-    # 各設定で実験を実行
-    all_results = {}
-    for config in experiment_configs:
-        try:
-            results = run_experiment(config, args.data_dir, args.output_dir)
-            all_results[f"{config.search_mode.value}_{config.split_mode}"] = results
-        except Exception as e:
-            print(
-                f"実験エラー ({config.search_mode.value}_{config.split_mode}): {str(e)}"
-            )
-
-    # 実験結果の比較分析
-    comparison = analyze_experiment_results(all_results)
-
-    # 比較結果の保存
-    comparison_file = os.path.join(
-        args.output_dir,
-        f"experiment_comparison_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-    )
-
-    with open(comparison_file, "w", encoding="utf-8") as f:
-        json.dump(comparison, f, ensure_ascii=False, indent=2)
-
-    print(f"\n実験比較結果を保存しました: {comparison_file}")
-
-
 def analyze_experiment_results(all_results: Dict[str, Any]) -> Dict[str, Any]:
     """実験結果の比較分析"""
     comparison = {
@@ -537,6 +537,63 @@ def analyze_experiment_results(all_results: Dict[str, Any]) -> Dict[str, Any]:
     return comparison
 
 
+def main(args):
+    print("ESG分析実験を開始します...")
+
+    # 実験設定の組み合わせ
+    experiment_configs = [
+        # FAISSのみ（チャンク分割）
+        ExperimentConfig(
+            search_mode=SearchMode.FAISS, split_mode="chunk", graph_mode="none"
+        ),
+        # FAISSのみ（文単位分割）
+        ExperimentConfig(
+            search_mode=SearchMode.FAISS, split_mode="sentence", graph_mode="none"
+        ),
+        # グラフのみ（チャンク分割）
+        ExperimentConfig(
+            search_mode=SearchMode.GRAPH, split_mode="chunk", graph_mode="networkx"
+        ),
+        # グラフのみ（文単位分割）
+        ExperimentConfig(
+            search_mode=SearchMode.GRAPH, split_mode="sentence", graph_mode="networkx"
+        ),
+        # ハイブリッド（チャンク分割）
+        ExperimentConfig(
+            search_mode=SearchMode.HYBRID, split_mode="chunk", graph_mode="networkx"
+        ),
+        # ハイブリッド（文単位分割）
+        ExperimentConfig(
+            search_mode=SearchMode.HYBRID, split_mode="sentence", graph_mode="networkx"
+        ),
+    ]
+
+    # 各設定で実験を実行
+    all_results = {}
+    for config in experiment_configs:
+        try:
+            results = run_experiment(config, args.data_dir, args.output_dir)
+            all_results[f"{config.search_mode.value}_{config.split_mode}"] = results
+        except Exception as e:
+            print(
+                f"実験エラー ({config.search_mode.value}_{config.split_mode}): {str(e)}"
+            )
+
+    # 実験結果の比較分析
+    comparison = analyze_experiment_results(all_results)
+
+    # 比較結果の保存
+    comparison_file = os.path.join(
+        args.output_dir,
+        f"experiment_comparison_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+    )
+
+    with open(comparison_file, "w", encoding="utf-8") as f:
+        json.dump(comparison, f, ensure_ascii=False, indent=2)
+
+    print(f"\n実験比較結果を保存しました: {comparison_file}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run ESG analysis experiments")
     parser.add_argument(
@@ -548,7 +605,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="experiment_results",
+        default="/root_nas05/home/2022/naoki/AI-Scientist/data/esg/experiments",
         help="Output directory for experiment results",
     )
 
