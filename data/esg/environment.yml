@@ -31,6 +31,7 @@ dependencies:
     - scikit-learn
     - neo4j
     - peft
+    - bitsandbytes
 
 # Setup Notes:
 # 1. Create/Update environment using:
