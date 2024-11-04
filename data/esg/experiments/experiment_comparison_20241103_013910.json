@@ -1,0 +1,108 @@
+{
+  "faiss_chunk": {
+    "config": {
+      "search_mode": "faiss",
+      "split_mode": "chunk",
+      "graph_mode": "none",
+      "model_name": "stockmark/stockmark-100b-instruct-v0.1",
+      "top_k": 5,
+      "similarity_threshold": 0.7,
+      "batch_size": 4,
+      "use_8bit": false,
+      "use_float16": true
+    },
+    "execution_time": 2650.546075105667,
+    "timestamp": "20241103_005902",
+    "queries": [
+      {
+        "query": "このレポートで議論されている主要なESG要因は何で、それらが投資判断にどのような影響を与える可能性がありますか？",
+        "error": "division by zero",
+        "metadata": {
+          "search_mode": "faiss",
+          "split_mode": "chunk",
+          "graph_mode": "none"
+        }
+      },
+      {
+        "query": "気候変動対策について、具体的な数値目標と実績を示してください。",
+        "error": "division by zero",
+        "metadata": {
+          "search_mode": "faiss",
+          "split_mode": "chunk",
+          "graph_mode": "none"
+        }
+      },
+      {
+        "query": "従業員の健康と安全に関する取り組みの実績を教えてください。",
+        "error": "division by zero",
+        "metadata": {
+          "search_mode": "faiss",
+          "split_mode": "chunk",
+          "graph_mode": "none"
+        }
+      },
+      {
+        "query": "コーポレートガバナンスの改善に向けた具体的な施策は何ですか？",
+        "error": "division by zero",
+        "metadata": {
+          "search_mode": "faiss",
+          "split_mode": "chunk",
+          "graph_mode": "none"
+        }
+      }
+    ]
+  },
+  "faiss_sentence": {
+    "config": {
+      "search_mode": "faiss",
+      "split_mode": "sentence",
+      "graph_mode": "none",
+      "model_name": "stockmark/stockmark-100b-instruct-v0.1",
+      "top_k": 5,
+      "similarity_threshold": 0.7,
+      "batch_size": 4,
+      "use_8bit": false,
+      "use_float16": true
+    },
+    "execution_time": 1827.596069574356,
+    "timestamp": "20241103_012931",
+    "queries": [
+      {
+        "query": "このレポートで議論されている主要なESG要因は何で、それらが投資判断にどのような影響を与える可能性がありますか？",
+        "error": "division by zero",
+        "metadata": {
+          "search_mode": "faiss",
+          "split_mode": "sentence",
+          "graph_mode": "none"
+        }
+      },
+      {
+        "query": "気候変動対策について、具体的な数値目標と実績を示してください。",
+        "error": "division by zero",
+        "metadata": {
+          "search_mode": "faiss",
+          "split_mode": "sentence",
+          "graph_mode": "none"
+        }
+      },
+      {
+        "query": "従業員の健康と安全に関する取り組みの実績を教えてください。",
+        "error": "division by zero",
+        "metadata": {
+          "search_mode": "faiss",
+          "split_mode": "sentence",
+          "graph_mode": "none"
+        }
+      },
+      {
+        "query": "コーポレートガバナンスの改善に向けた具体的な施策は何ですか？",
+        "error": "division by zero",
+        "metadata": {
+          "search_mode": "faiss",
+          "split_mode": "sentence",
+          "graph_mode": "none"
+        }
+      }
+    ]
+  }
+}
