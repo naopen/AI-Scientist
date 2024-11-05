@@ -1,0 +1,20 @@
+{
+  "total_chunks": 3682,
+  "industries": [
+    "小売",
+    "情報通信",
+    "自動車"
+  ],
+  "processed_files": [
+    "小売/セブン&アイ・ホールディングス_2023_sustainability.pdf",
+    "小売/ファーストリテイリング_2023_sustainability.pdf",
+    "小売/マツキヨココカラ&カンパニー_2023_sustainability.pdf",
+    "情報通信/KDDI_2023_sustainability.pdf",
+    "情報通信/ソフトバンク_2023_sustainability.pdf",
+    "情報通信/日本電信電話_2023_integrated.pdf",
+    "自動車/アイシン_2023_integrated.pdf",
+    "自動車/トヨタ自動車_2023_integrated.pdf",
+    "自動車/ホンダ_2023_sustainability.pdf"
+  ],
+  "timestamp": "2024-11-05T08:33:45.466829"
+}
