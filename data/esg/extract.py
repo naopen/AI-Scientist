@@ -322,7 +322,7 @@ def main():
 
     # 設定
     config = SearchConfig(
-        chunk_size=300, chunk_overlap=50, batch_size=16, similarity_threshold=0.2
+        chunk_size=300, chunk_overlap=50, batch_size=16, similarity_threshold=0.4
     )
 
     try:
